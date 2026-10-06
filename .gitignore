@@ -1,0 +1,11 @@
+node_modules/
+dist/
+src-tauri/target/
+src-tauri/gen/
+bench-work/
+*.log
+.DS_Store
+Thumbs.db
+.vscode
+.idea
+release/
