@@ -90,7 +90,12 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           name: P2PShare ${{ github.ref_name }}
-          files: ./artifacts/*
+          # Each installer sits in its bundle folder (nsis/, dmg/, appimage/).
+          files: |
+            artifacts/**/*.exe
+            artifacts/**/*.dmg
+            artifacts/**/*.AppImage
+          fail_on_unmatched_files: true
           make_latest: true
           generate_release_notes: true
           body: |
