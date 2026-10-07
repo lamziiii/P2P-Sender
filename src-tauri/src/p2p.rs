@@ -14,6 +14,16 @@
 //!
 //! All state lives in one `State` behind a mutex that is never held across an
 //! `.await`; events produced while it is locked are dispatched after unlocking.
+//!
+//! Groups (see `groups.rs`) add connections between co-members who are not
+//! friends, and a signed log per group synced over the same control stream.
+
+mod groups;
+
+pub use groups::{
+    GroupDetail, GroupFileView, GroupMessageView, GroupSummary, GroupsOverview, InviteView,
+    MemberView,
+};
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::File;
@@ -43,7 +53,8 @@ const CHUNK_SIZE: u64 = 1 << 20;
 const DISK_BUFFER: usize = 8 << 20;
 const MAX_FRAME: usize = 256 * 1024;
 
-const DIAL_TIMEOUT: Duration = Duration::from_secs(30);
+const DIAL_TIMEOUT: Duration = Duration::from_secs(15);
+const ONLINE_TIMEOUT: Duration = Duration::from_secs(15);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const RECONNECT_INTERVAL: Duration = Duration::from_secs(15);
 // A peer that just started is not published yet: retry a few times quickly.
@@ -189,6 +200,20 @@ pub enum Event {
     Transfer(TransferView),
     FileOffer(TransferView),
     TransferComplete(TransferView),
+    GroupUpdate {
+        gid: String,
+    },
+    GroupMessage {
+        gid: String,
+        group: String,
+        author: String,
+        text: String,
+    },
+    GroupInvite {
+        gid: String,
+        group: String,
+        from: String,
+    },
 }
 
 pub struct Options {
@@ -197,6 +222,10 @@ pub struct Options {
     pub messages: JsonStore<Messages>,
     pub download_dir: Arc<dyn Fn() -> PathBuf + Send + Sync>,
     pub on_event: Arc<dyn Fn(Event) + Send + Sync>,
+    /// Where group logs, group settings and shared-file records live.
+    pub groups_dir: PathBuf,
+    /// Our display name in groups.
+    pub nickname: String,
 }
 
 // ─── Internal state ──────────────────────────────────────────────────────────
@@ -241,6 +270,10 @@ struct Transfer {
     resyncing: bool,
     /// Cleared from the list by the user; kept to answer re-offers.
     hidden: bool,
+    /// Outgoing: serves a shared file a member asked for (no consent, no re-offer).
+    serve: bool,
+    /// Incoming: downloads a shared file of a group.
+    repo: Option<groups::Repo>,
     // speed sampling
     speed: f64,
     sample_bytes: u64,
@@ -290,8 +323,13 @@ struct Conn {
 
 struct State {
     me: String,
+    secret: SecretKey,
+    nickname: String,
     friends: JsonStore<Vec<Friend>>,
     messages: JsonStore<Messages>,
+    groups: HashMap<String, groups::GroupState>,
+    gmeta: JsonStore<groups::GroupsMeta>,
+    groups_dir: PathBuf,
     conns: HashMap<String, Conn>,
     dialing: HashSet<String>,
     fast_retries: HashMap<String, u8>,
@@ -342,6 +380,8 @@ impl State {
             saved_path: None,
             resyncing: false,
             hidden: false,
+            serve: false,
+            repo: None,
             speed: 0.0,
             sample_bytes: 0,
             sample_time: Instant::now(),
@@ -558,6 +598,7 @@ impl Node {
             .stream_receive_window(VarInt::from_u32(32 << 20))
             .send_window(64 << 20)
             .build();
+        let secret = opts.secret.clone();
         let endpoint = Endpoint::builder(presets::N0)
             .secret_key(opts.secret)
             .alpns(vec![ALPN.to_vec()])
@@ -566,10 +607,17 @@ impl Node {
             .await
             .map_err(io::Error::other)?;
 
+        let _ = std::fs::create_dir_all(&opts.groups_dir);
+        let (gmeta, group_states) = groups::load(&opts.groups_dir);
         let state = State {
             me: endpoint.id().to_string(),
+            secret,
+            nickname: opts.nickname,
             friends: opts.friends,
             messages: opts.messages,
+            groups: group_states,
+            gmeta,
+            groups_dir: opts.groups_dir,
             conns: HashMap::new(),
             dialing: HashSet::new(),
             fast_retries: HashMap::new(),
@@ -590,6 +638,16 @@ impl Node {
         node.spawn(node.clone().accept_loop());
         node.spawn(node.clone().timers());
         node.with(|s| node.reconnect_tick(s));
+        // Dials made before we reach our relay often fail: once online, give
+        // every peer a fresh round of quick retries.
+        let n = node.clone();
+        node.spawn(async move {
+            let _ = tokio::time::timeout(ONLINE_TIMEOUT, n.0.endpoint.online()).await;
+            n.with(|s| {
+                s.fast_retries.clear();
+                n.reconnect_tick(s);
+            });
+        });
         Ok(node)
     }
 
@@ -603,6 +661,10 @@ impl Node {
         self.with(|s| {
             s.friends.save_now();
             s.messages.save_now();
+            s.gmeta.save_now();
+            for (path, lines) in s.take_group_writes() {
+                let _ = groups::append_lines(&path, &lines);
+            }
         });
     }
 
@@ -645,7 +707,7 @@ impl Node {
                 self.wake();
             }
 
-            let (messages, friends) = self.with(|s| {
+            let (stores, logs) = self.with(|s| {
                 let active: Vec<String> = s
                     .transfers
                     .values()
@@ -659,10 +721,25 @@ impl Node {
                     last_reconnect = Instant::now();
                     self.reconnect_tick(s);
                 }
-                (s.messages.take_dirty(), s.friends.take_dirty())
+                (
+                    [
+                        s.messages.take_dirty(),
+                        s.friends.take_dirty(),
+                        s.gmeta.take_dirty(),
+                    ],
+                    s.take_group_writes(),
+                )
             });
-            for (path, json) in [messages, friends].into_iter().flatten() {
+            for (path, json) in stores.into_iter().flatten() {
                 let _ = tokio::task::spawn_blocking(move || write_atomic(&path, &json)).await;
+            }
+            if !logs.is_empty() {
+                let _ = tokio::task::spawn_blocking(move || {
+                    for (path, lines) in logs {
+                        let _ = groups::append_lines(&path, &lines);
+                    }
+                })
+                .await;
             }
         }
     }
@@ -680,14 +757,21 @@ impl Node {
     }
 
     fn reconnect_tick(&self, s: &mut State) {
-        let ids: Vec<String> = s.friends.data.iter().map(|f| f.id.clone()).collect();
+        let mut ids: Vec<String> = s.friends.data.iter().map(|f| f.id.clone()).collect();
+        let others: Vec<String> = s
+            .group_peers()
+            .into_iter()
+            .filter(|p| !s.is_friend(p))
+            .collect();
+        ids.extend(others);
         for id in ids {
-            if s.conns.contains_key(&id) {
-                s.flush_outbox(&id, false);
-            } else {
+            if !s.conns.contains_key(&id) {
                 self.dial(s, &id);
+            } else if s.is_friend(&id) {
+                s.flush_outbox(&id, false);
             }
         }
+        self.groups_tick(s);
     }
 
     // ─── Friends ─────────────────────────────────────────────────────────────
@@ -744,11 +828,14 @@ impl Node {
             for tid in running {
                 self.cancel(s, &tid);
             }
-            if let Some(c) = s.conns.get(id) {
-                c.conn.close(VarInt::from_u32(CLOSE_REJECTED), b"removed");
-            }
             s.friends.data.retain(|f| f.id != id);
             s.friends.save_now();
+            // Still a co-member of one of our groups: keep the connection.
+            if !s.is_allowed(id) {
+                if let Some(c) = s.conns.get(id) {
+                    c.conn.close(VarInt::from_u32(CLOSE_REJECTED), b"removed");
+                }
+            }
             friend_views(s)
         })
     }
@@ -773,7 +860,7 @@ impl Node {
             }
             let retry = node.with(|s| {
                 s.dialing.remove(&friend_id);
-                if s.conns.contains_key(&friend_id) || !s.is_friend(&friend_id) {
+                if s.conns.contains_key(&friend_id) || !s.is_allowed(&friend_id) {
                     return false;
                 }
                 let tries = s.fast_retries.entry(friend_id.clone()).or_insert(0);
@@ -796,9 +883,9 @@ impl Node {
                 let Ok(Ok(conn)) = tokio::time::timeout(HANDSHAKE_TIMEOUT, incoming).await else {
                     return;
                 };
-                // Only friends may connect.
+                // Only friends and members of our groups may connect.
                 let friend_id = conn.remote_id().to_string();
-                if !node.with(|s| s.is_friend(&friend_id)) {
+                if !node.with(|s| s.is_allowed(&friend_id)) {
                     conn.close(VarInt::from_u32(CLOSE_REJECTED), b"not a friend");
                     return;
                 }
@@ -839,7 +926,7 @@ impl Node {
         outgoing: bool,
     ) {
         let friend_id = conn.remote_id().to_string();
-        if !s.is_friend(&friend_id) {
+        if !s.is_allowed(&friend_id) {
             conn.close(VarInt::from_u32(CLOSE_REJECTED), b"not a friend");
             return;
         }
@@ -906,6 +993,7 @@ impl Node {
             .values()
             .filter(|t| {
                 t.dir == Dir::Out
+                    && !t.serve
                     && t.friend_id == friend_id
                     && !t.status.is_final()
                     && t.status != Status::Sending
@@ -915,6 +1003,7 @@ impl Node {
         for tid in to_offer {
             self.offer(s, &tid);
         }
+        self.groups_on_connect(s, &friend_id);
     }
 
     fn on_close(&self, s: &mut State, friend_id: &str, conn_id: u64) {
@@ -935,6 +1024,20 @@ impl Node {
         for tid in affected {
             let t = &s.transfers[&tid];
             let (dir, status, bound) = (t.dir, t.status, t.conn_id == Some(conn_id));
+            if t.serve {
+                // The downloader asks again (here or elsewhere) when it can.
+                if bound || !live {
+                    s.transfers.get_mut(&tid).unwrap().shared.next_session();
+                    s.set_status(&tid, Status::Cancelled, None);
+                }
+                continue;
+            }
+            if t.repo.is_some() {
+                if !live {
+                    self.next_source(s, &tid, friend_id);
+                }
+                continue;
+            }
             if dir == Dir::Out && bound {
                 let t = s.transfers.get_mut(&tid).unwrap();
                 t.shared.next_session();
@@ -967,14 +1070,22 @@ impl Node {
 
     fn on_control(&self, s: &mut State, friend_id: &str, conn_id: u64, msg: &Value) {
         let tid = msg.get("tid").and_then(Value::as_str).filter(|t| is_tid(t));
+        // Group co-members who are not friends get no private chat or offers.
+        let friend = s.is_friend(friend_id);
         match msg.get("type").and_then(Value::as_str) {
-            Some("chat") => self.on_chat(s, friend_id, msg),
-            Some("chat_ack") => self.on_chat_ack(s, friend_id, msg),
-            Some("file_offer") => self.on_offer(s, friend_id, msg),
+            Some("chat") if friend => self.on_chat(s, friend_id, msg),
+            Some("chat_ack") if friend => self.on_chat_ack(s, friend_id, msg),
+            Some("file_offer") if friend => self.on_offer(s, friend_id, msg),
             Some("file_accept") => self.on_accept(s, friend_id, conn_id, msg),
             Some("file_reject") => self.on_peer_stop(s, friend_id, tid, Status::Declined),
             Some("file_cancel") => self.on_peer_stop(s, friend_id, tid, Status::Cancelled),
             Some("file_complete") => self.on_complete(s, friend_id, tid),
+            Some("group_invite") if friend => self.on_group_invite(s, friend_id, msg),
+            Some("group_decline") => self.on_group_decline(s, friend_id, msg),
+            Some("group_have") => self.on_group_have(s, friend_id, msg),
+            Some("group_entries") => self.on_group_entries(s, friend_id, msg),
+            Some("blob_req") => self.on_blob_req(s, friend_id, conn_id, msg),
+            Some("blob_missing") => self.on_blob_missing(s, friend_id, msg),
             _ => {}
         }
     }
@@ -1448,6 +1559,7 @@ impl Node {
         let shared = t.shared.clone();
         let part = t.part_path.clone().unwrap_or_default();
         let name = t.file_name.clone();
+        let expected = t.repo.as_ref().map(|r| r.hash.clone());
         s.set_status(tid, Status::Finishing, None);
         let node = self.clone();
         let tid = tid.to_string();
@@ -1472,6 +1584,12 @@ impl Node {
                 let _ = tokio::fs::remove_file(&part).await;
                 return node.fail(&tid, "Écriture sur le disque impossible");
             }
+            if let Some(hash) = expected.clone() {
+                if !Node::verify_download(part.clone(), hash).await {
+                    let _ = tokio::fs::remove_file(&part).await;
+                    return node.fail(&tid, "Fichier corrompu : empreinte invalide");
+                }
+            }
             let target = unique_path(part.parent().unwrap_or(Path::new(".")), &name);
             let renamed = tokio::fs::rename(&part, &target).await.is_ok();
             node.with(|s| {
@@ -1483,11 +1601,15 @@ impl Node {
                 }
                 let friend_id = t.friend_id.clone();
                 if renamed {
-                    t.saved_path = Some(target);
+                    t.saved_path = Some(target.clone());
                     s.set_status(&tid, Status::Completed, None);
                     s.send(&friend_id, json!({ "type": "file_complete", "tid": tid }));
-                    let view = s.transfers[&tid].view();
-                    s.events.push(Event::TransferComplete(view));
+                    if expected.is_some() {
+                        node.record_download(s, &tid, &target);
+                    } else {
+                        let view = s.transfers[&tid].view();
+                        s.events.push(Event::TransferComplete(view));
+                    }
                 } else {
                     s.send(&friend_id, json!({ "type": "file_cancel", "tid": tid }));
                     node.stop_transfer(
@@ -1508,6 +1630,12 @@ impl Node {
             return;
         };
         if t.friend_id != friend_id || t.status.is_final() {
+            return;
+        }
+        if t.repo.is_some() {
+            // A source that stops is not the end: another member may have it.
+            let id = t.id.clone();
+            self.next_source(s, &id, friend_id);
             return;
         }
         let error = (status == Status::Cancelled).then(|| "Annulé par le contact".to_string());

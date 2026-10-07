@@ -1,6 +1,8 @@
 import { useState, useEffect, useRef } from 'react';
 import { api } from './api';
-import type { ChatMessage, Config, Friend, Transfer } from './api';
+import type { ChatMessage, Config, Friend, GroupsOverview, OpenChat, Transfer } from './api';
+import { formatBytes } from './format';
+import { GroupsTab, GroupView } from './Groups';
 import { Icon } from './icons';
 
 const ACTIVE = new Set(['sending', 'receiving']);
@@ -10,13 +12,6 @@ const ADD_FRIEND_ERRORS: Record<string, string> = {
   invalid_id: 'ID invalide : il doit faire 64 caractères (0-9, a-f).',
   self: 'C’est votre propre ID.',
   no_name: 'Indiquez un pseudo.',
-};
-
-const formatBytes = (n: number) => {
-  if (n >= 1024 ** 3) return `${(n / 1024 ** 3).toFixed(2)} Go`;
-  if (n >= 1024 ** 2) return `${(n / 1024 ** 2).toFixed(1)} Mo`;
-  if (n >= 1024) return `${(n / 1024).toFixed(0)} Ko`;
-  return `${n} o`;
 };
 
 const formatSpeed = (bps: number) => (bps > 0 ? `${formatBytes(bps)}/s` : '');
@@ -63,6 +58,9 @@ function App() {
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [chatInput, setChatInput] = useState('');
   const [chatError, setChatError] = useState('');
+  const [overview, setOverview] = useState<GroupsOverview>({ groups: [], invites: [] });
+  const [groupId, setGroupId] = useState<string | null>(null);
+  const [nickname, setNickname] = useState('');
   const [theme, setTheme] = useState<'light' | 'dark'>(
     () => (localStorage.getItem('theme') as 'light' | 'dark') ?? 'dark'
   );
@@ -72,6 +70,7 @@ function App() {
   const chatFriend = friends.find(f => f.id === chatFriendId) ?? null;
   const offers = transfers.filter(t => t.dir === 'in' && t.status === 'pending');
   const transferList = transfers.filter(t => t.status !== 'pending');
+  const groupBadge = overview.invites.length + overview.groups.reduce((n, g) => n + g.unread, 0);
   const runningCount = transferList.filter(t => !FINAL.has(t.status)).length;
   const friendName = (id: string) => friends.find(f => f.id === id)?.name;
 
@@ -87,10 +86,23 @@ function App() {
     setActiveTab('chat');
   };
 
+  const openGroup = (gid: string) => {
+    chatFriendIdRef.current = null;
+    setGroupId(gid);
+    setActiveTab('group');
+  };
+
+  const openFromOutside = (target: OpenChat | null) => {
+    if (target?.kind === 'group') openGroup(target.id);
+    else if (target) openChatWith(target.id);
+  };
+
   useEffect(() => {
     api.getMyId().then(setMyId);
     api.getFriends().then(setFriends);
-    api.getConfig().then(setConfig);
+    api.getConfig().then(c => { setConfig(c); setNickname(c.nickname); });
+    const loadGroups = () => api.getGroups().then(setOverview);
+    loadGroups();
     api.getTransfers().then(list => setTransfers(prev => {
       const known = new Set(prev.map(t => t.id));
       return [...prev, ...list.filter(t => !known.has(t.id))];
@@ -114,13 +126,17 @@ function App() {
         if (chatFriendIdRef.current !== friendId) return;
         setChatMessages(prev => prev.map(m => (m.id === id ? { ...m, status } : m)));
       }),
-      api.onOpenChat(friendId => { openChatWith(friendId); }),
+      api.onOpenChat(openFromOutside),
+      api.onGroupUpdate(loadGroups),
       api.onFriendStatus(({ friendId, online }) => {
         setFriends(prev => prev.map(f => (f.id === friendId ? { ...f, online } : f)));
+        loadGroups();
       }),
     ];
-    api.takeOpenChat().then(friendId => { if (friendId) openChatWith(friendId); });
+    api.takeOpenChat().then(openFromOutside);
     return () => unsubscribers.forEach(unsubscribe => unsubscribe());
+    // Subscribed once: the handlers only use state setters and refs.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -174,6 +190,11 @@ function App() {
 
   const onlineCount = friends.filter(f => f.online).length;
   const onlineLabel = onlineCount === 0 ? 'Aucun ami en ligne' : `${onlineCount} ami${onlineCount > 1 ? 's' : ''} en ligne`;
+
+  /* ─── Group View ─── */
+  if (activeTab === 'group' && groupId) {
+    return <GroupView key={groupId} gid={groupId} friends={friends} transfers={transfers} onBack={() => setActiveTab('groups')} />;
+  }
 
   /* ─── Chat View ─── */
   if (activeTab === 'chat' && chatFriend) {
@@ -262,6 +283,9 @@ function App() {
           <button className={`pivot-btn ${activeTab === 'friends' ? 'active' : ''}`} onClick={() => setActiveTab('friends')}>
             Amis
           </button>
+          <button className={`pivot-btn ${activeTab === 'groups' ? 'active' : ''}`} onClick={() => setActiveTab('groups')}>
+            Groupes{groupBadge > 0 && <span className="badge">{groupBadge}</span>}
+          </button>
           <button className={`pivot-btn ${activeTab === 'transfers' ? 'active' : ''}`} onClick={() => setActiveTab('transfers')}>
             Transferts{runningCount > 0 && <span className="badge">{runningCount}</span>}
           </button>
@@ -345,6 +369,9 @@ function App() {
           </>
         )}
 
+        {/* ── Groups Tab ── */}
+        {activeTab === 'groups' && <GroupsTab overview={overview} friends={friends} onOpen={openGroup} />}
+
         {/* ── Transfers Tab ── */}
         {activeTab === 'transfers' && (
           <>
@@ -417,6 +444,19 @@ function App() {
             <div className="page-title">
               <button className="icon-btn" title="Retour" onClick={() => setActiveTab('friends')}><Icon name="back" /></button>
               <span>Paramètres</span>
+            </div>
+
+            <div className="card">
+              <div className="card-label">Mon pseudo</div>
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                <input className="input" maxLength={40} placeholder="Nom affiché dans les groupes" value={nickname} onChange={e => setNickname(e.target.value)} />
+                <button className="btn btn-secondary btn-small" style={{ height: 34 }} disabled={!nickname.trim() || nickname.trim() === config.nickname} onClick={async () => {
+                  const saved = await api.setNickname(nickname);
+                  setNickname(saved);
+                  setConfig({ ...config, nickname: saved });
+                }}>Enregistrer</button>
+              </div>
+              <div className="setting-sub" style={{ marginTop: 6 }}>Vu par les membres de vos groupes qui ne sont pas vos amis.</div>
             </div>
 
             <div className="card">

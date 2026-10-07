@@ -49,6 +49,8 @@ async fn main() {
         on_event: Arc::new(move |e| {
             let _ = tx.send(e);
         }),
+        groups_dir: work.join(format!("{role}-v3-groups")),
+        nickname: role.clone(),
     })
     .await
     .expect("bind");

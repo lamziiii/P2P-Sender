@@ -1,3 +1,4 @@
+pub mod group;
 mod notify;
 pub mod p2p;
 pub mod store;
@@ -20,14 +21,18 @@ use tauri_plugin_autostart::{MacosLauncher, ManagerExt as _};
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
 
-use p2p::{ChatMessage, Event, FriendView, Messages, Node, TransferView};
+use p2p::{
+    ChatMessage, Event, FriendView, GroupDetail, GroupFileView, GroupMessageView, GroupsOverview,
+    Messages, Node, TransferView,
+};
 use store::JsonStore;
 
 const WINDOW_MARGIN: f64 = 12.0;
 const HIDDEN_ARG: &str = "--hidden";
 
 static QUITTING: AtomicBool = AtomicBool::new(false);
-static PENDING_CHAT: Mutex<Option<String>> = Mutex::new(None);
+/// Chat to open once a freshly created window has loaded: (kind, id).
+static PENDING_CHAT: Mutex<Option<(&'static str, String)>> = Mutex::new(None);
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -36,10 +41,22 @@ struct Config {
     download_path: String,
     #[serde(default = "enabled")]
     auto_launch: bool,
+    /// Display name in groups.
+    #[serde(default = "default_nickname")]
+    nickname: String,
 }
 
 fn enabled() -> bool {
     true
+}
+
+fn default_nickname() -> String {
+    std::env::var("USERNAME")
+        .or_else(|_| std::env::var("USER"))
+        .unwrap_or_default()
+        .chars()
+        .take(group::MAX_NICK)
+        .collect()
 }
 
 struct AppState {
@@ -178,11 +195,145 @@ fn clear_finished(state: State<AppState>) {
 }
 
 #[tauri::command]
-fn take_open_chat() -> Option<String> {
+fn take_open_chat() -> Option<Value> {
     PENDING_CHAT
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .take()
+        .map(|(kind, id)| json!({ "kind": kind, "id": id }))
+}
+
+#[tauri::command]
+fn set_nickname(state: State<AppState>, nickname: String) -> String {
+    let nickname: String = nickname.trim().chars().take(group::MAX_NICK).collect();
+    let mut config = state.config();
+    config.data.nickname = nickname.clone();
+    config.save_now();
+    drop(config);
+    state.node.set_nickname(&nickname);
+    nickname
+}
+
+// ─── Groups ──────────────────────────────────────────────────────────────────
+
+#[tauri::command]
+fn get_groups(state: State<AppState>) -> GroupsOverview {
+    state.node.groups()
+}
+
+#[tauri::command]
+fn create_group(state: State<AppState>, name: String, members: Vec<String>) -> Value {
+    match state.node.create_group(&name, &members) {
+        Ok(id) => json!({ "id": id }),
+        Err(error) => json!({ "error": error }),
+    }
+}
+
+#[tauri::command]
+fn respond_to_group_invite(state: State<AppState>, gid: String, accept: bool) {
+    state.node.respond_to_invite(&gid, accept);
+}
+
+#[tauri::command]
+fn get_group(state: State<AppState>, gid: String) -> Option<GroupDetail> {
+    state.node.group_detail(&gid)
+}
+
+#[tauri::command]
+fn get_group_messages(state: State<AppState>, gid: String) -> Vec<GroupMessageView> {
+    state.node.group_messages(&gid)
+}
+
+#[tauri::command]
+fn send_group_message(state: State<AppState>, gid: String, text: String) -> Value {
+    match state.node.group_send(&gid, &text) {
+        Ok(()) => json!({ "ok": true }),
+        Err(error) => json!({ "error": error }),
+    }
+}
+
+#[tauri::command]
+fn add_group_members(state: State<AppState>, gid: String, members: Vec<String>) -> Value {
+    match state.node.group_add_members(&gid, &members) {
+        Ok(()) => json!({ "ok": true }),
+        Err(error) => json!({ "error": error }),
+    }
+}
+
+#[tauri::command]
+fn remove_group_member(state: State<AppState>, gid: String, member: String) {
+    state.node.group_remove_member(&gid, &member);
+}
+
+#[tauri::command]
+fn leave_group(state: State<AppState>, gid: String) {
+    state.node.group_leave(&gid);
+}
+
+#[tauri::command]
+fn forget_group(state: State<AppState>, gid: String) {
+    state.node.forget_group(&gid);
+}
+
+#[tauri::command]
+fn rename_group(state: State<AppState>, gid: String, name: String) {
+    state.node.group_rename(&gid, &name);
+}
+
+#[tauri::command]
+fn mark_group_read(state: State<AppState>, gid: String) {
+    state.node.group_mark_read(&gid);
+}
+
+#[tauri::command]
+fn get_group_files(state: State<AppState>, gid: String) -> Vec<GroupFileView> {
+    state.node.group_files(&gid)
+}
+
+#[tauri::command]
+async fn add_group_files(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    gid: String,
+) -> Result<usize, ()> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let mut dialog = app
+        .dialog()
+        .file()
+        .set_title("Ajouter des fichiers au dépôt du groupe");
+    if let Some(w) = app.get_webview_window("main") {
+        dialog = dialog.set_parent(&w);
+    }
+    dialog.pick_files(move |files| {
+        let _ = tx.send(files);
+    });
+    let files = rx.await.ok().flatten().unwrap_or_default();
+    let paths: Vec<PathBuf> = files
+        .into_iter()
+        .filter_map(|f| f.into_path().ok())
+        .collect();
+    let node = state.node.clone();
+    Ok(node.group_add_files(&gid, paths).await)
+}
+
+#[tauri::command]
+fn download_group_file(state: State<AppState>, gid: String, file_id: String) -> Value {
+    match state.node.group_download(&gid, &file_id) {
+        Ok(id) => json!({ "id": id }),
+        Err(error) => json!({ "error": error }),
+    }
+}
+
+#[tauri::command]
+fn delete_group_file(state: State<AppState>, gid: String, file_id: String) {
+    state.node.group_delete_file(&gid, &file_id);
+}
+
+#[tauri::command]
+fn show_group_file(app: AppHandle, state: State<AppState>, gid: String, file_id: String) {
+    if let Some(path) = state.node.group_file_path(&gid, &file_id) {
+        let _ = app.opener().reveal_item_in_dir(path);
+    }
 }
 
 #[tauri::command]
@@ -247,14 +398,21 @@ fn toggle_window(app: &AppHandle) {
     }
 }
 
-/// Open a chat from outside the UI (notification click). A freshly created
-/// window has not loaded yet, so it picks the chat up once mounted.
-fn open_chat(app: &AppHandle, friend_id: String) {
+/// Open a chat ("friend" or "group") from outside the UI (notification
+/// click). A freshly created window has not loaded yet, so it picks the chat
+/// up once mounted.
+fn open_chat(app: &AppHandle, kind: &'static str, id: String) {
     if show_window(app) {
-        *PENDING_CHAT.lock().unwrap_or_else(|e| e.into_inner()) = Some(friend_id);
+        *PENDING_CHAT.lock().unwrap_or_else(|e| e.into_inner()) = Some((kind, id));
     } else {
-        let _ = app.emit("open-chat", friend_id);
+        let _ = app.emit("open-chat", json!({ "kind": kind, "id": id }));
     }
+}
+
+fn window_focused(app: &AppHandle) -> bool {
+    main_window(app)
+        .and_then(|w| w.is_focused().ok())
+        .unwrap_or(false)
 }
 
 /// Anchor the window in the corner of the work area next to the taskbar,
@@ -386,16 +544,13 @@ fn on_p2p_event(app: &AppHandle, event: Event) {
                 "new-message",
                 json!({ "friendId": friend_id, "message": message }),
             );
-            let focused = main_window(app)
-                .and_then(|w| w.is_focused().ok())
-                .unwrap_or(false);
-            if !focused {
+            if !window_focused(app) {
                 let handle = app.clone();
                 notify::notify(
                     app,
                     &friend_name(app, &friend_id),
                     &message.text,
-                    move || open_chat(&handle, friend_id),
+                    move || open_chat(&handle, "friend", friend_id),
                 );
             }
         }
@@ -424,6 +579,34 @@ fn on_p2p_event(app: &AppHandle, event: Event) {
                     if let Some(path) = t.saved_path {
                         let _ = handle.opener().reveal_item_in_dir(path);
                     }
+                },
+            );
+        }
+        Event::GroupUpdate { gid } => {
+            let _ = app.emit("group-update", json!({ "gid": gid }));
+        }
+        Event::GroupMessage {
+            gid,
+            group,
+            author,
+            text,
+        } => {
+            if !window_focused(app) {
+                let handle = app.clone();
+                notify::notify(app, &format!("{group} — {author}"), &text, move || {
+                    open_chat(&handle, "group", gid)
+                });
+            }
+        }
+        Event::GroupInvite { gid, group, from } => {
+            let _ = app.emit("group-update", json!({ "gid": gid }));
+            let handle = app.clone();
+            notify::notify(
+                app,
+                &format!("{from} vous invite dans un groupe"),
+                &format!("« {group} » — Cliquez pour accepter ou refuser."),
+                move || {
+                    show_window(&handle);
                 },
             );
         }
@@ -504,6 +687,7 @@ fn setup(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
         Config {
             download_path: String::new(),
             auto_launch: true,
+            nickname: default_nickname(),
         },
     );
     if config.data.download_path.is_empty() {
@@ -511,6 +695,7 @@ fn setup(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
         config.save_now();
     }
     let auto_launch = config.data.auto_launch;
+    let nickname = config.data.nickname.clone();
     let config = Arc::new(Mutex::new(config));
 
     let mut friends = JsonStore::<Vec<p2p::Friend>>::load(dir.join("friends.json"), Vec::new());
@@ -538,6 +723,8 @@ fn setup(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
             }
         }),
         on_event: Arc::new(move |e| on_p2p_event(&handle, e)),
+        groups_dir: dir.join("groups"),
+        nickname,
     }))?;
 
     app.manage(AppState { node, config });
@@ -553,10 +740,14 @@ fn setup(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let app = tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+    let mut builder = tauri::Builder::default();
+    // An instance with its own data folder (tests) runs alongside the real one.
+    if std::env::var_os("P2PSHARE_DATA_DIR").is_none() {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             show_window(app);
-        }))
+        }));
+    }
+    let app = builder
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_autostart::init(
@@ -581,6 +772,24 @@ pub fn run() {
             respond_to_file_offer,
             cancel_transfer,
             show_in_folder,
+            set_nickname,
+            get_groups,
+            create_group,
+            respond_to_group_invite,
+            get_group,
+            get_group_messages,
+            send_group_message,
+            add_group_members,
+            remove_group_member,
+            leave_group,
+            forget_group,
+            rename_group,
+            mark_group_read,
+            get_group_files,
+            add_group_files,
+            download_group_file,
+            delete_group_file,
+            show_group_file,
         ])
         .setup(|app| setup(app.handle()))
         .build(tauri::generate_context!())
