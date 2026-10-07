@@ -3,6 +3,7 @@ name = "p2pshare"
 version = "3.0.0"
 description = "Partage de fichiers et chat en pair-à-pair"
 authors = ["lamzii"]
+license = "MIT"
 edition = "2021"
 rust-version = "1.85"
 

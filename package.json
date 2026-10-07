@@ -4,6 +4,7 @@
   "version": "3.0.0",
   "description": "Secure P2P file sharing and chat (Tauri + iroh)",
   "author": "lamzii",
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "dev": "tauri dev",
