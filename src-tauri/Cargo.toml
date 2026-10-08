@@ -1,6 +1,6 @@
 [package]
 name = "p2pshare"
-version = "3.1.0"
+version = "3.2.0"
 description = "Partage de fichiers et chat en pair-à-pair"
 authors = ["lamzii"]
 license = "MIT"
@@ -29,6 +29,7 @@ bytes = "1"
 hex = "0.4"
 rand = "0.9"
 uuid = { version = "1", features = ["v4"] }
+url = "2"
 
 [target.'cfg(windows)'.dependencies]
 tauri-winrt-notification = "0.8"

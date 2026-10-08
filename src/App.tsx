@@ -4,6 +4,7 @@ import type { ChatMessage, Config, Friend, GroupsOverview, OpenChat, Transfer } 
 import { formatBytes } from './format';
 import { GroupsTab, GroupView } from './Groups';
 import { Icon } from './icons';
+import { RelaySettings } from './RelaySettings';
 
 const ACTIVE = new Set(['sending', 'receiving']);
 const FINAL = new Set(['completed', 'declined', 'cancelled', 'error']);
@@ -469,6 +470,8 @@ function App() {
                 }}>Changer</button>
               </div>
             </div>
+
+            <RelaySettings config={config} />
 
             <div className="card">
               <div className="setting-row">

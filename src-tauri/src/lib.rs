@@ -22,13 +22,17 @@ use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
 
 use p2p::{
-    ChatMessage, Event, FriendView, GroupDetail, GroupFileView, GroupMessageView, GroupsOverview,
-    Messages, Node, TransferView,
+    ChatMessage, CustomRelay, Event, FriendView, GroupDetail, GroupFileView, GroupMessageView,
+    GroupsOverview,
+    Messages, Node, RelayStatusView, TransferView,
 };
 use store::JsonStore;
 
 const WINDOW_MARGIN: f64 = 12.0;
 const HIDDEN_ARG: &str = "--hidden";
+/// Set before restarting to apply new settings, so the window comes back
+/// even if the app was started hidden at login.
+const SHOW_AFTER_RESTART: &str = "P2PSHARE_SHOW_WINDOW";
 
 static QUITTING: AtomicBool = AtomicBool::new(false);
 /// Chat to open once a freshly created window has loaded: (kind, id).
@@ -44,6 +48,11 @@ struct Config {
     /// Display name in groups.
     #[serde(default = "default_nickname")]
     nickname: String,
+    /// Self-hosted relay; empty for iroh's public relays.
+    #[serde(default)]
+    relay_url: String,
+    #[serde(default)]
+    relay_token: String,
 }
 
 fn enabled() -> bool {
@@ -105,6 +114,38 @@ fn remove_friend(state: State<AppState>, id: String) -> Vec<FriendView> {
 #[tauri::command]
 fn get_config(state: State<AppState>) -> Config {
     state.config().data.clone()
+}
+
+#[tauri::command]
+fn get_relay_status(state: State<AppState>) -> Option<RelayStatusView> {
+    state.node.relay_status()
+}
+
+/// Saves the relay setting and restarts the app to apply it.
+#[tauri::command]
+async fn set_relay(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    url: String,
+    token: String,
+) -> Result<(), String> {
+    let (url, token) = if url.trim().is_empty() {
+        (String::new(), String::new())
+    } else {
+        let relay = CustomRelay::parse(&url, &token)?;
+        (relay.url.to_string(), relay.token.unwrap_or_default())
+    };
+    {
+        let mut config = state.config();
+        if config.data.relay_url == url && config.data.relay_token == token {
+            return Ok(());
+        }
+        config.data.relay_url = url;
+        config.data.relay_token = token;
+        config.save_now();
+    }
+    std::env::set_var(SHOW_AFTER_RESTART, "1");
+    app.restart();
 }
 
 #[tauri::command]
@@ -688,6 +729,8 @@ fn setup(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
             download_path: String::new(),
             auto_launch: true,
             nickname: default_nickname(),
+            relay_url: String::new(),
+            relay_token: String::new(),
         },
     );
     if config.data.download_path.is_empty() {
@@ -696,6 +739,13 @@ fn setup(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     }
     let auto_launch = config.data.auto_launch;
     let nickname = config.data.nickname.clone();
+    let relay = if config.data.relay_url.is_empty() {
+        None
+    } else {
+        CustomRelay::parse(&config.data.relay_url, &config.data.relay_token)
+            .inspect_err(|e| eprintln!("relay setting ignored: {e}"))
+            .ok()
+    };
     let config = Arc::new(Mutex::new(config));
 
     let mut friends = JsonStore::<Vec<p2p::Friend>>::load(dir.join("friends.json"), Vec::new());
@@ -725,6 +775,7 @@ fn setup(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
         on_event: Arc::new(move |e| on_p2p_event(&handle, e)),
         groups_dir: dir.join("groups"),
         nickname,
+        relay,
     }))?;
 
     app.manage(AppState { node, config });
@@ -732,7 +783,9 @@ fn setup(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     apply_auto_launch(app, auto_launch);
     create_tray(app)?;
     // Started at login: stay in the tray without creating the web view.
-    if !std::env::args().any(|a| a == HIDDEN_ARG) {
+    let restarted = std::env::var_os(SHOW_AFTER_RESTART).is_some();
+    std::env::remove_var(SHOW_AFTER_RESTART);
+    if restarted || !std::env::args().any(|a| a == HIDDEN_ARG) {
         show_window(app);
     }
     Ok(())
@@ -773,6 +826,8 @@ pub fn run() {
             cancel_transfer,
             show_in_folder,
             set_nickname,
+            get_relay_status,
+            set_relay,
             get_groups,
             create_group,
             respond_to_group_invite,

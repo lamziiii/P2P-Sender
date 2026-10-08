@@ -3664,7 +3664,7 @@ dependencies = [
 
 [[package]]
 name = "p2pshare"
-version = "3.1.0"
+version = "3.2.0"
 dependencies = [
  "blake3",
  "bytes",
@@ -3682,6 +3682,7 @@ dependencies = [
  "tauri-plugin-single-instance",
  "tauri-winrt-notification",
  "tokio",
+ "url",
  "uuid",
 ]
 

@@ -51,6 +51,7 @@ async fn main() {
         }),
         groups_dir: work.join(format!("{role}-v3-groups")),
         nickname: role.clone(),
+        relay: None,
     })
     .await
     .expect("bind");

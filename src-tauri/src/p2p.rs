@@ -36,7 +36,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
 use iroh::endpoint::{presets, Connection, QuicTransportConfig, RecvStream, SendStream, VarInt};
-use iroh::{Endpoint, PublicKey, SecretKey};
+use iroh::address_lookup::{PkarrPublisher, PkarrResolver};
+use iroh::{Endpoint, PublicKey, RelayConfig, RelayMap, RelayMode, RelayUrl, SecretKey, Watcher};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::io::{AsyncWriteExt, BufWriter};
@@ -102,6 +103,52 @@ pub struct Friend {
     pub id: String,
     #[serde(default)]
     pub name: String,
+}
+
+/// A self-hosted relay (see the P2P-Sender-relay project), used instead of
+/// iroh's public relays on networks that block them.
+#[derive(Clone)]
+pub struct CustomRelay {
+    pub url: RelayUrl,
+    pub token: Option<String>,
+}
+
+impl CustomRelay {
+    /// Accepts `relay.example.com` or a full `https://…` URL.
+    pub fn parse(url: &str, token: &str) -> Result<Self, String> {
+        let url = url.trim();
+        let full = if url.contains("://") {
+            url.to_string()
+        } else {
+            format!("https://{url}")
+        };
+        let parsed = url::Url::parse(&full).map_err(|_| "Adresse invalide".to_string())?;
+        if !matches!(parsed.scheme(), "https" | "http") || parsed.host_str().is_none() {
+            return Err("L'adresse doit commencer par https://".into());
+        }
+        if parsed.path() != "/" {
+            return Err("Le relais doit être à la racine du domaine (sans chemin)".into());
+        }
+        let token = token.trim();
+        Ok(CustomRelay {
+            url: RelayUrl::from(parsed),
+            token: (!token.is_empty()).then(|| token.to_string()),
+        })
+    }
+
+    fn pkarr_url(&self) -> url::Url {
+        let mut url = url::Url::from(self.url.clone());
+        url.set_path("/pkarr");
+        url
+    }
+}
+
+#[derive(Clone, Serialize)]
+pub struct RelayStatusView {
+    pub url: String,
+    pub custom: bool,
+    pub connected: bool,
+    pub error: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -226,6 +273,8 @@ pub struct Options {
     pub groups_dir: PathBuf,
     /// Our display name in groups.
     pub nickname: String,
+    /// Replaces iroh's public relays when set.
+    pub relay: Option<CustomRelay>,
 }
 
 // ─── Internal state ──────────────────────────────────────────────────────────
@@ -586,6 +635,7 @@ struct Inner {
     rt: Handle,
     download_dir: Arc<dyn Fn() -> PathBuf + Send + Sync>,
     on_event: Arc<dyn Fn(Event) + Send + Sync>,
+    custom_relay: bool,
 }
 
 #[derive(Clone)]
@@ -599,10 +649,25 @@ impl Node {
             .send_window(64 << 20)
             .build();
         let secret = opts.secret.clone();
-        let endpoint = Endpoint::builder(presets::N0)
+        let mut builder = Endpoint::builder(presets::N0)
             .secret_key(opts.secret)
             .alpns(vec![ALPN.to_vec()])
-            .transport_config(transport)
+            .transport_config(transport);
+        let custom_relay = opts.relay.is_some();
+        if let Some(relay) = &opts.relay {
+            // Our relay becomes our only home relay, so friends always reach
+            // us through it; we still publish to and look up in iroh's public
+            // directory (kept by the preset) as well as the relay's own.
+            let mut config = RelayConfig::new(relay.url.clone(), None);
+            if let Some(token) = &relay.token {
+                config = config.with_auth_token(token.clone());
+            }
+            builder = builder
+                .relay_mode(RelayMode::Custom(RelayMap::from(config)))
+                .address_lookup(PkarrPublisher::builder(relay.pkarr_url()))
+                .address_lookup(PkarrResolver::builder(relay.pkarr_url()));
+        }
+        let endpoint = builder
             .bind()
             .await
             .map_err(io::Error::other)?;
@@ -633,6 +698,7 @@ impl Node {
             rt: Handle::current(),
             download_dir: opts.download_dir,
             on_event: opts.on_event,
+            custom_relay,
         }));
 
         node.spawn(node.clone().accept_loop());
@@ -670,6 +736,25 @@ impl Node {
 
     pub fn id(&self) -> String {
         self.0.endpoint.id().to_string()
+    }
+
+    /// Our home relay, `None` until one is picked.
+    pub fn relay_status(&self) -> Option<RelayStatusView> {
+        let status = self.0.endpoint.home_relay_status().get();
+        let home = status.first()?;
+        let error = if home.is_connected() {
+            None
+        } else if let Some(reason) = home.auth_denied_reason() {
+            Some(format!("Refusé par le relais : {reason}"))
+        } else {
+            home.last_error().map(|e| e.to_string())
+        };
+        Some(RelayStatusView {
+            url: home.url().to_string(),
+            custom: self.0.custom_relay,
+            connected: home.is_connected(),
+            error,
+        })
     }
 
     fn spawn<F: std::future::Future<Output = ()> + Send + 'static>(&self, f: F) {

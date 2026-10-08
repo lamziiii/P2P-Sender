@@ -3,13 +3,14 @@
 //!   cargo run --release --example groups_test -- <workdir>
 //!
 //! A is friends with B and C; B and C are not friends with each other.
+//! Set P2P_RELAY_URL (and P2P_RELAY_TOKEN) to go through a self-hosted relay.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use iroh::SecretKey;
-use p2pshare_lib::p2p::{Messages, Node, Options};
+use p2pshare_lib::p2p::{CustomRelay, Messages, Node, Options};
 use p2pshare_lib::store::JsonStore;
 
 const TIMEOUT: Duration = Duration::from_secs(90);
@@ -44,10 +45,18 @@ impl Peer {
             on_event: Arc::new(|_| {}),
             groups_dir: self.dir.join("groups"),
             nickname: self.name.to_string(),
+            relay: relay(),
         })
         .await
         .expect("bind")
     }
+}
+
+/// P2P_RELAY_URL / P2P_RELAY_TOKEN: run the test through a self-hosted relay.
+fn relay() -> Option<CustomRelay> {
+    let url = std::env::var("P2P_RELAY_URL").ok()?;
+    let token = std::env::var("P2P_RELAY_TOKEN").unwrap_or_default();
+    Some(CustomRelay::parse(&url, &token).expect("P2P_RELAY_URL"))
 }
 
 async fn wait(what: &str, mut ok: impl FnMut() -> bool) {

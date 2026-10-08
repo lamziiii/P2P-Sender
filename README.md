@@ -34,6 +34,10 @@ Version 3 replaces Electron/Node.js with Tauri/Rust and Hyperswarm with iroh:
 - Set your nickname in the settings: it is how members who are not your friends see you.
 - Groups need version 3.1 for every member; friends on 3.0 keep private chat and transfers.
 
+## Self-hosted relay (version 3.2)
+
+Some networks (eduroam behind a FortiGate, for example) block iroh's public relays and address directory, so friends cannot reach each other. Version 3.2 can use your own relay instead: run [P2P-Sender-relay](https://github.com/lamziiii/P2P-Sender-relay) behind an HTTPS reverse proxy, then enter its address (and token) in Settings → Relais personnel. Friends who want to reach you from such a network use the same relay.
+
 ## Getting Started
 
 ### Prerequisites
@@ -79,6 +83,7 @@ pwsh bench/run.ps1 -Sender v3 -Receiver v3 -File <some big file>
 - `src-tauri/src/group.rs`: group log (signed entries, replay, sync state).
 - `src-tauri/src/p2p/groups.rs`: group networking (invitations, sync, shared files).
 - `src/Groups.tsx`: groups UI.
+- `src/RelaySettings.tsx`: self-hosted relay setting.
 - `src-tauri/src/lib.rs`: window, tray, notifications, settings, commands.
 - `src-tauri/src/notify.rs`: clickable native notifications per platform.
 

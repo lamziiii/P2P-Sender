@@ -23,7 +23,15 @@ export type Transfer = {
   savedPath?: string;
 };
 
-export type Config = { downloadPath: string; autoLaunch: boolean; nickname: string };
+export type Config = {
+  downloadPath: string;
+  autoLaunch: boolean;
+  nickname: string;
+  relayUrl: string;
+  relayToken: string;
+};
+
+export type RelayStatus = { url: string; custom: boolean; connected: boolean; error?: string };
 
 export type GroupSummary = {
   id: string;
@@ -117,6 +125,9 @@ export const api = {
   // Chat requested by a notification click before this window existed.
   takeOpenChat: () => invoke<OpenChat | null>('take_open_chat'),
   setNickname: (nickname: string) => invoke<string>('set_nickname', { nickname }),
+  getRelayStatus: () => invoke<RelayStatus | null>('get_relay_status'),
+  // Restarts the app when the setting changes.
+  setRelay: (url: string, token: string) => invoke<void>('set_relay', { url, token }),
 
   // Groups
   getGroups: () => invoke<GroupsOverview>('get_groups'),
