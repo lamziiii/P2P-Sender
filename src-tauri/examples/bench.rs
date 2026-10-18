@@ -5,12 +5,14 @@
 //!
 //! Both sides publish their ID in <workdir>/<role>.id and read the other's,
 //! so the same workdir can pair this binary with bench/electron-bench.mjs.
+//! With BENCH_NO_LAN set, the local-network fast path is off (QUIC only).
 
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use iroh::SecretKey;
+use p2pshare_lib::localsend::Identity;
 use p2pshare_lib::p2p::{Event, Messages, Node, Options, Status};
 use p2pshare_lib::store::JsonStore;
 use tokio::sync::mpsc;
@@ -52,6 +54,9 @@ async fn main() {
         groups_dir: work.join(format!("{role}-v3-groups")),
         nickname: role.clone(),
         relay: None,
+        lan: std::env::var_os("BENCH_NO_LAN").is_none().then(|| {
+            Identity::load_or_create(&work.join(format!("{role}-lan.json"))).expect("lan identity")
+        }),
     })
     .await
     .expect("bind");
@@ -71,6 +76,7 @@ async fn main() {
     let paired = Instant::now();
 
     let mut transfer_start = None;
+    let mut via_lan = false;
     loop {
         let event = tokio::time::timeout(CONNECT_TIMEOUT, events.recv()).await;
         let Ok(Some(event)) = event else {
@@ -91,9 +97,13 @@ async fn main() {
                     node.send_files(&peer, &[file.clone().unwrap()]);
                 }
             }
-            Event::FileOffer(t) => {
+            Event::FileOffer(t, _) => {
                 transfer_start = Some(Instant::now());
                 node.respond_to_offer(&t.id, true);
+            }
+            Event::Transfer(t) if t.lan && !via_lan => {
+                via_lan = true;
+                println!("[v3 {role}] via le réseau local");
             }
             Event::Transfer(t) if t.status == Status::Completed => {
                 let secs = transfer_start

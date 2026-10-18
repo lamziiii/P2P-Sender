@@ -21,6 +21,12 @@ export type Transfer = {
   status: TransferStatus;
   error?: string;
   savedPath?: string;
+  // Sender outside the P2P network (LocalSend).
+  peerName?: string;
+  // Opening it may run code (program, script, shortcut…).
+  executable: boolean;
+  // Its bytes go over the local network, not the internet.
+  lan: boolean;
 };
 
 export type Config = {
@@ -29,9 +35,37 @@ export type Config = {
   nickname: string;
   relayUrl: string;
   relayToken: string;
+  localsend: boolean;
 };
 
 export type RelayStatus = { url: string; custom: boolean; connected: boolean; error?: string };
+
+export type LocalSendDevice = {
+  fingerprint: string;
+  alias: string;
+  deviceModel?: string;
+  deviceType?: 'mobile' | 'desktop' | 'web' | 'headless' | 'server';
+  // HTTPS to the device holding this fingerprint; otherwise unencrypted.
+  secure: boolean;
+};
+
+// A message of a LocalSend device's chat. unverified: theirs, from an older
+// LocalSend that proves nothing about who sent it.
+export type LocalSendMessage = {
+  id: string;
+  mine: boolean;
+  text: string;
+  ts: number;
+  status?: 'pending' | 'delivered' | 'failed';
+  error?: string;
+  unverified: boolean;
+};
+
+export type LocalSendChat = { fingerprint: string; alias: string; unread: number; lastText: string; lastTs: number };
+
+export type LocalSendStatus =
+  | { running: true; status: { port: number; alias: string; fingerprint: string; error?: string } }
+  | { running: false; error?: string };
 
 export type GroupSummary = {
   id: string;
@@ -49,7 +83,8 @@ export type GroupInvite = { gid: string; name: string; from: string; fromName: s
 
 export type GroupsOverview = { groups: GroupSummary[]; invites: GroupInvite[] };
 
-export type GroupMember = { id: string; name: string; online: boolean; friend: boolean; me: boolean };
+// removable: we created the group or added them.
+export type GroupMember = { id: string; name: string; online: boolean; friend: boolean; me: boolean; removable: boolean };
 
 export type GroupDetail = { id: string; name: string; members: GroupMember[]; syncing: boolean; removed: boolean };
 
@@ -76,7 +111,7 @@ export type GroupFile = {
   transferId: string | null;
 };
 
-export type OpenChat = { kind: 'friend' | 'group'; id: string };
+export type OpenChat = { kind: 'friend' | 'group' | 'localsend'; id: string };
 
 type Unsubscribe = () => void;
 
@@ -85,10 +120,12 @@ type Unsubscribe = () => void;
 const on = <T>(event: string) => (callback: (data: T) => void): Unsubscribe => {
   let stop: Unsubscribe | null = null;
   let stopped = false;
-  listen<T>(event, e => callback(e.payload)).then(unlisten => {
-    if (stopped) unlisten();
-    else stop = unlisten;
-  });
+  listen<T>(event, e => callback(e.payload))
+    .then(unlisten => {
+      if (stopped) unlisten();
+      else stop = unlisten;
+    })
+    .catch(e => console.error(`listen ${event}:`, e));
   return () => {
     stopped = true;
     stop?.();
@@ -128,6 +165,23 @@ export const api = {
   getRelayStatus: () => invoke<RelayStatus | null>('get_relay_status'),
   // Restarts the app when the setting changes.
   setRelay: (url: string, token: string) => invoke<void>('set_relay', { url, token }),
+  getLocalSendStatus: () => invoke<LocalSendStatus>('get_localsend_status'),
+  setLocalSend: (enable: boolean) => invoke<LocalSendStatus>('set_localsend', { enable }),
+  getLocalSendChats: () => invoke<LocalSendChat[]>('get_localsend_chats'),
+  getLocalSendChat: (fingerprint: string) =>
+    invoke<{ alias: string; messages: LocalSendMessage[] }>('get_localsend_chat', { fingerprint }),
+  markLocalSendRead: (fingerprint: string) => { invoke('mark_localsend_read', { fingerprint }); },
+  // Resolves to the message, shown as pending until the device has it.
+  sendLocalSendText: (fingerprint: string, text: string) =>
+    invoke<LocalSendMessage>('send_localsend_text', { fingerprint, text }),
+  // A message arrived, or one of ours changed status.
+  onLocalSendChat: on<{ fingerprint: string; alias: string; message: LocalSendMessage }>('localsend-chat'),
+  getLocalSendDevices: () => invoke<LocalSendDevice[]>('get_localsend_devices'),
+  // Looks again; the list changes through onLocalSendDevices.
+  scanLocalSend: () => { invoke('scan_localsend'); },
+  onLocalSendDevices: on<null>('localsend-devices'),
+  // Picks the files, then sends them; resolves to how many.
+  sendToLocalSend: (fingerprint: string) => invoke<number>('send_localsend_files', { fingerprint }),
 
   // Groups
   getGroups: () => invoke<GroupsOverview>('get_groups'),
@@ -154,6 +208,5 @@ export const api = {
   onGroupUpdate: on<{ gid: string }>('group-update'),
 
   // UI / presence
-  onSwitchTab: on<string>('switch-tab'),
   onFriendStatus: on<{ friendId: string; online: boolean }>('friend-status'),
 };

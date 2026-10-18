@@ -17,8 +17,15 @@
 //!
 //! Groups (see `groups.rs`) add connections between co-members who are not
 //! friends, and a signed log per group synced over the same control stream.
+//! Files can also come from outside the P2P network (see `external.rs`).
+//! With a peer on the same local network, the data streams go over a direct
+//! TCP + TLS connection instead, which is faster there (see `lan.rs`).
 
+mod external;
 mod groups;
+mod lan;
+
+pub use external::{ExternalFile, OutgoingFile};
 
 pub use groups::{
     GroupDetail, GroupFileView, GroupMessageView, GroupSummary, GroupsOverview, InviteView,
@@ -30,7 +37,7 @@ use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -42,7 +49,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio::runtime::Handle;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::store::{write_atomic, JsonStore};
 
@@ -68,6 +75,17 @@ const CHAT_RETRY: Duration = Duration::from_secs(10);
 const MAX_TEXT: usize = 5000;
 const RATE_LIMIT: usize = 30;
 const RATE_WINDOW: Duration = Duration::from_secs(10);
+/// Control messages of any kind a peer may send per `RATE_WINDOW`.
+const CONTROL_RATE_LIMIT: usize = 1000;
+/// Offers from one friend waiting for our answer.
+const MAX_PENDING_OFFERS: usize = 100;
+/// Bytes waiting to be sent to a peer that does not read them.
+const MAX_QUEUED: usize = 64 << 20;
+/// Messages kept per conversation.
+const MAX_HISTORY: usize = 10_000;
+const MESSAGES_SAVE_INTERVAL: Duration = Duration::from_secs(5);
+/// Finished transfers hidden from the list are forgotten after that long.
+const FORGET_FINISHED: Duration = Duration::from_secs(60 * 60);
 
 const CLOSE_NORMAL: u32 = 0;
 const CLOSE_DUPLICATE: u32 = 1;
@@ -123,7 +141,16 @@ impl CustomRelay {
             format!("https://{url}")
         };
         let parsed = url::Url::parse(&full).map_err(|_| "Adresse invalide".to_string())?;
-        if !matches!(parsed.scheme(), "https" | "http") || parsed.host_str().is_none() {
+        // Plain http would send the token in the clear: only for a relay on
+        // this computer.
+        let local = match parsed.host() {
+            Some(url::Host::Domain(d)) => d.eq_ignore_ascii_case("localhost"),
+            Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+            Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+            None => false,
+        };
+        let scheme_ok = parsed.scheme() == "https" || (parsed.scheme() == "http" && local);
+        if !scheme_ok || parsed.host_str().is_none() {
             return Err("L'adresse doit commencer par https://".into());
         }
         if parsed.path() != "/" {
@@ -229,6 +256,13 @@ pub struct TransferView {
     pub error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub saved_path: Option<String>,
+    /// Sender's name for transfers from outside the P2P network.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub peer_name: Option<String>,
+    /// The file runs code when opened (program, script, shortcut…).
+    pub executable: bool,
+    /// Its bytes go over the local network (see `lan.rs`).
+    pub lan: bool,
 }
 
 pub enum Event {
@@ -245,7 +279,8 @@ pub enum Event {
         id: String,
     },
     Transfer(TransferView),
-    FileOffer(TransferView),
+    /// An offer, and how many files came with it (one notification for all).
+    FileOffer(TransferView, usize),
     TransferComplete(TransferView),
     GroupUpdate {
         gid: String,
@@ -275,6 +310,8 @@ pub struct Options {
     pub nickname: String,
     /// Replaces iroh's public relays when set.
     pub relay: Option<CustomRelay>,
+    /// Our certificate for the local-network fast path, which is off without.
+    pub lan: Option<crate::localsend::Identity>,
 }
 
 // ─── Internal state ──────────────────────────────────────────────────────────
@@ -288,6 +325,8 @@ struct Shared {
     session: watch::Sender<u64>,
     /// Receiver side: the open `.part` file, owned by one stream at a time.
     writer: tokio::sync::Mutex<Option<Writer>>,
+    /// The running stream goes over the local network.
+    lan: AtomicBool,
 }
 
 impl Shared {
@@ -310,8 +349,13 @@ struct Transfer {
     status: Status,
     error: Option<String>,
     shared: Arc<Shared>,
+    /// When it reached a final status.
+    ended: Option<Instant>,
     // outgoing
     src_path: Option<PathBuf>,
+    /// Modification time of the source when offered: a resume must not mix
+    /// two versions of the file.
+    src_mtime: Option<SystemTime>,
     conn_id: Option<u64>,
     // incoming
     part_path: Option<PathBuf>,
@@ -323,6 +367,10 @@ struct Transfer {
     serve: bool,
     /// Incoming: downloads a shared file of a group.
     repo: Option<groups::Repo>,
+    /// Incoming from outside the P2P network: the sender's name, and who
+    /// waits for the user's answer to the offer.
+    peer_name: Option<String>,
+    decision: Option<oneshot::Sender<bool>>,
     // speed sampling
     speed: f64,
     sample_bytes: u64,
@@ -358,6 +406,9 @@ impl Transfer {
                 .saved_path
                 .as_ref()
                 .map(|p| p.to_string_lossy().into_owned()),
+            peer_name: self.peer_name.clone(),
+            executable: self.dir == Dir::In && is_executable(&self.file_name),
+            lan: self.status.is_active() && self.shared.lan.load(Ordering::Relaxed),
         }
     }
 }
@@ -366,8 +417,23 @@ struct Conn {
     id: u64,
     conn: Connection,
     tx: mpsc::UnboundedSender<Vec<u8>>,
+    /// Bytes in `tx` not written yet.
+    queued: Arc<AtomicU64>,
     since: Instant,
     outgoing: bool,
+}
+
+impl Conn {
+    /// Queue a frame; a peer that lets too much pile up is cut off.
+    fn push(&self, data: Vec<u8>) {
+        let len = data.len() as u64;
+        if self.queued.fetch_add(len, Ordering::Relaxed) + len > MAX_QUEUED as u64 {
+            self.conn
+                .close(VarInt::from_u32(CLOSE_REJECTED), b"not reading");
+            return;
+        }
+        let _ = self.tx.send(data);
+    }
 }
 
 struct State {
@@ -385,6 +451,12 @@ struct State {
     transfers: HashMap<String, Transfer>,
     chat_last_sent: HashMap<String, Instant>,
     rate: HashMap<String, VecDeque<Instant>>,
+    /// What peers told us of their local-network address, and when the
+    /// connection to one last failed.
+    lan_peers: HashMap<String, lan::LanPeer>,
+    lan_down: HashMap<String, Instant>,
+    /// What we tell peers of ours, once we have an address.
+    lan_advert: Option<Value>,
     events: Vec<Event>,
     next_id: u64,
 }
@@ -422,8 +494,11 @@ impl State {
                 bytes: AtomicU64::new(0),
                 session: watch::Sender::new(0),
                 writer: tokio::sync::Mutex::new(None),
+                lan: AtomicBool::new(false),
             }),
+            ended: None,
             src_path: None,
+            src_mtime: None,
             conn_id: None,
             part_path: None,
             saved_path: None,
@@ -431,6 +506,8 @@ impl State {
             hidden: false,
             serve: false,
             repo: None,
+            peer_name: None,
+            decision: None,
             speed: 0.0,
             sample_bytes: 0,
             sample_time: Instant::now(),
@@ -441,8 +518,16 @@ impl State {
 
     fn send(&self, friend_id: &str, msg: Value) {
         if let Some(c) = self.conns.get(friend_id) {
-            let _ = c.tx.send(frame(&msg));
+            c.push(frame(&msg));
         }
+    }
+
+    /// Forget finished transfers nobody looks at any more.
+    fn forget_finished(&mut self) {
+        self.transfers.retain(|_, t| {
+            let old = t.ended.is_some_and(|e| e.elapsed() > FORGET_FINISHED);
+            !(old && (t.hidden || t.serve))
+        });
     }
 
     fn emit_transfer(&mut self, id: &str) {
@@ -479,6 +564,11 @@ impl State {
         }
         let was_active = t.status.is_active();
         t.status = status;
+        if status.is_final() {
+            // Dropping it tells an external sender the file is not coming.
+            t.decision = None;
+            t.ended = Some(Instant::now());
+        }
         if error.is_some() {
             t.error = error;
         }
@@ -491,6 +581,12 @@ impl State {
     }
 
     fn is_rate_limited(&mut self, key: &str) -> bool {
+        self.over_limit(key, RATE_LIMIT)
+    }
+
+    /// Counts one more event for `key`; true once more than `limit` happened
+    /// within `RATE_WINDOW` (the extra ones are not counted).
+    fn over_limit(&mut self, key: &str, limit: usize) -> bool {
         let now = Instant::now();
         let bucket = self.rate.entry(key.to_string()).or_default();
         while bucket
@@ -499,7 +595,7 @@ impl State {
         {
             bucket.pop_front();
         }
-        let limited = bucket.len() >= RATE_LIMIT;
+        let limited = bucket.len() >= limit;
         if !limited {
             bucket.push_back(now);
         }
@@ -527,7 +623,7 @@ impl State {
                 continue;
             }
             self.chat_last_sent.insert(m.id.clone(), now);
-            let _ = c.tx.send(frame(
+            c.push(frame(
                 &json!({ "type": "chat", "id": m.id, "text": m.text, "ts": m.ts }),
             ));
         }
@@ -569,8 +665,41 @@ async fn session_changed(rx: &mut watch::Receiver<u64>, session: u64) {
 
 // ─── File names ──────────────────────────────────────────────────────────────
 
+/// Remove control characters and the invisible ones that change how text
+/// reads (e.g. U+202E turns "invoice\u{202E}fdp.exe" into "invoiceexe.pdf").
+pub fn strip_invisible(s: &str) -> String {
+    s.chars()
+        .filter(|c| {
+            let c = *c as u32;
+            !(c < 0x20
+                || (0x7f..=0x9f).contains(&c)
+                || c == 0xad
+                || c == 0x061c
+                || c == 0x180e
+                || (0x200b..=0x200f).contains(&c)
+                || (0x202a..=0x202e).contains(&c)
+                || (0x2060..=0x206f).contains(&c)
+                || c == 0xfeff
+                || (0xfff9..=0xfffb).contains(&c))
+        })
+        .collect()
+}
+
+/// Whether opening the file may run code.
+pub fn is_executable(name: &str) -> bool {
+    const RISKY: &[&str] = &[
+        "exe", "com", "scr", "pif", "bat", "cmd", "msi", "msp", "msix", "appx", "appinstaller",
+        "ps1", "psm1", "vbs", "vbe", "js", "jse", "wsf", "wsh", "hta", "cpl", "lnk", "url", "scf",
+        "reg", "jar", "dll", "sys", "inf", "chm", "iso", "img", "vhd", "vhdx", "application",
+        "settingcontent-ms", "library-ms", "docm", "xlsm", "pptm", "dotm", "xlam", "ppam", "sh",
+        "command", "app", "pkg", "dmg", "deb", "rpm", "appimage", "run", "desktop",
+    ];
+    let ext = extension(name).trim_start_matches('.').to_lowercase();
+    RISKY.contains(&ext.as_str())
+}
+
 pub fn sanitize_file_name(name: &str) -> String {
-    let unified = name.replace('\\', "/");
+    let unified = strip_invisible(name).replace('\\', "/");
     let base = unified
         .trim_end_matches('/')
         .rsplit('/')
@@ -588,11 +717,19 @@ pub fn sanitize_file_name(name: &str) -> String {
         .collect();
     let mut n = replaced.trim_end_matches(['.', ' ']).trim().to_string();
 
-    let stem = n.split('.').next().unwrap_or("").to_ascii_lowercase();
-    let reserved = matches!(stem.as_str(), "con" | "prn" | "aux" | "nul")
-        || (stem.len() == 4
-            && (stem.starts_with("com") || stem.starts_with("lpt"))
-            && stem.as_bytes()[3].is_ascii_digit());
+    // Windows device names, also with an extension or trailing spaces.
+    let stem = n.split('.').next().unwrap_or("").trim_end().to_lowercase();
+    let port = |prefix: &str| {
+        stem.strip_prefix(prefix).is_some_and(|rest| {
+            let mut c = rest.chars();
+            matches!((c.next(), c.next()), (Some(d), None) if d.is_ascii_digit() || "¹²³".contains(d))
+        })
+    };
+    let reserved = matches!(
+        stem.as_str(),
+        "con" | "prn" | "aux" | "nul" | "conin$" | "conout$" | "clock$"
+    ) || port("com")
+        || port("lpt");
     if reserved {
         n = format!("_{n}");
     }
@@ -615,16 +752,100 @@ fn extension(name: &str) -> &str {
     }
 }
 
-fn unique_path(dir: &Path, name: &str) -> PathBuf {
+/// Create an empty file named `name` in `dir`, or "name (1)", "name (2)"…
+/// if taken. Creating it claims the name: two downloads finishing together
+/// can never pick the same one.
+fn reserve_path(dir: &Path, name: &str) -> io::Result<PathBuf> {
     let ext = extension(name);
     let base = &name[..name.len() - ext.len()];
-    let mut candidate = dir.join(name);
-    let mut i = 1;
-    while candidate.exists() {
-        candidate = dir.join(format!("{base} ({i}){ext}"));
-        i += 1;
+    for i in 0..10_000 {
+        let candidate = if i == 0 {
+            dir.join(name)
+        } else {
+            dir.join(format!("{base} ({i}){ext}"))
+        };
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(_) => return Ok(candidate),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
     }
-    candidate
+    Err(io::ErrorKind::AlreadyExists.into())
+}
+
+/// A new, empty `.part` file for receiving `name` in `dir`.
+fn create_part(dir: &Path, name: &str) -> io::Result<(PathBuf, File)> {
+    std::fs::create_dir_all(dir)?;
+    loop {
+        let suffix = hex::encode(rand::random::<[u8; 4]>());
+        let path = dir.join(format!("{name}.{suffix}.part"));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(file) => return Ok((path, file)),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// Whether `name` is one of our `.part` files: "<name>.<8 hex>.part".
+fn is_part_file(name: &str) -> bool {
+    let Some(rest) = name.strip_suffix(".part") else {
+        return false;
+    };
+    rest.len() > 9
+        && rest.is_char_boundary(rest.len() - 9)
+        && rest[rest.len() - 9..].starts_with('.')
+        && rest[rest.len() - 8..].bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// Remove `.part` files left by a previous run (transfers do not survive a
+/// restart) in the download folder and the shared-files folders.
+fn remove_stale_parts(download_dir: &Path) {
+    let mut dirs = vec![download_dir.to_path_buf()];
+    if let Ok(list) = std::fs::read_dir(download_dir.join(groups::REPO_FOLDER)) {
+        dirs.extend(list.flatten().map(|e| e.path()).filter(|p| p.is_dir()));
+    }
+    for dir in dirs {
+        let Ok(list) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in list.flatten() {
+            let name = entry.file_name();
+            let is_file = entry.file_type().is_ok_and(|t| t.is_file());
+            if is_file && name.to_str().is_some_and(is_part_file) {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+}
+
+/// Mark a received file as coming from another computer, so the system
+/// warns before running it (SmartScreen, Office Protected View, Gatekeeper).
+fn mark_downloaded(path: &Path) {
+    #[cfg(windows)]
+    {
+        let mut stream = path.as_os_str().to_owned();
+        stream.push(":Zone.Identifier");
+        let _ = std::fs::write(stream, "[ZoneTransfer]\r\nZoneId=3\r\n");
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let value = format!("0081;{:x};P2P Share;", now_ms() / 1000);
+        let _ = std::process::Command::new("xattr")
+            .args(["-w", "com.apple.quarantine", &value])
+            .arg(path)
+            .status();
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    let _ = path;
 }
 
 // ─── Node ────────────────────────────────────────────────────────────────────
@@ -636,6 +857,7 @@ struct Inner {
     download_dir: Arc<dyn Fn() -> PathBuf + Send + Sync>,
     on_event: Arc<dyn Fn(Event) + Send + Sync>,
     custom_relay: bool,
+    lan: Option<lan::Lan>,
 }
 
 #[derive(Clone)]
@@ -672,6 +894,18 @@ impl Node {
             .await
             .map_err(io::Error::other)?;
 
+        // Without it, everything goes over QUIC as before.
+        let (lan, lan_listener) = match opts.lan {
+            Some(identity) => match lan::Lan::bind(identity).await {
+                Ok((lan, listener)) => (Some(lan), Some(listener)),
+                Err(e) => {
+                    eprintln!("réseau local indisponible : {e}");
+                    (None, None)
+                }
+            },
+            None => (None, None),
+        };
+
         let _ = std::fs::create_dir_all(&opts.groups_dir);
         let (gmeta, group_states) = groups::load(&opts.groups_dir);
         let state = State {
@@ -689,6 +923,9 @@ impl Node {
             transfers: HashMap::new(),
             chat_last_sent: HashMap::new(),
             rate: HashMap::new(),
+            lan_peers: HashMap::new(),
+            lan_down: HashMap::new(),
+            lan_advert: None,
             events: Vec::new(),
             next_id: 0,
         };
@@ -699,8 +936,16 @@ impl Node {
             download_dir: opts.download_dir,
             on_event: opts.on_event,
             custom_relay,
+            lan,
         }));
+        if let Some(listener) = lan_listener {
+            node.start_lan(listener);
+        }
 
+        let download_dir = (node.0.download_dir)();
+        node.spawn(async move {
+            let _ = tokio::task::spawn_blocking(move || remove_stale_parts(&download_dir)).await;
+        });
         node.spawn(node.clone().accept_loop());
         node.spawn(node.clone().timers());
         node.with(|s| node.reconnect_tick(s));
@@ -725,9 +970,9 @@ impl Node {
 
     pub fn save_now(&self) {
         self.with(|s| {
-            s.friends.save_now();
-            s.messages.save_now();
-            s.gmeta.save_now();
+            let _ = s.friends.save_now();
+            let _ = s.messages.save_now();
+            let _ = s.gmeta.save_now();
             for (path, lines) in s.take_group_writes() {
                 let _ = groups::append_lines(&path, &lines);
             }
@@ -777,6 +1022,7 @@ impl Node {
         let mut tick = tokio::time::interval(TICK);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut last_reconnect = Instant::now();
+        let mut last_messages_save = Instant::now();
         let mut last_wall = SystemTime::now();
         loop {
             tick.tick().await;
@@ -805,10 +1051,18 @@ impl Node {
                 if last_reconnect.elapsed() >= RECONNECT_INTERVAL {
                     last_reconnect = Instant::now();
                     self.reconnect_tick(s);
+                    s.forget_finished();
                 }
+                // The whole history is rewritten each time: not on every message.
+                let messages = if last_messages_save.elapsed() >= MESSAGES_SAVE_INTERVAL {
+                    last_messages_save = Instant::now();
+                    s.messages.take_dirty()
+                } else {
+                    None
+                };
                 (
                     [
-                        s.messages.take_dirty(),
+                        messages,
                         s.friends.take_dirty(),
                         s.gmeta.take_dirty(),
                     ],
@@ -895,7 +1149,8 @@ impl Node {
                     name,
                 }),
             }
-            s.friends.save_now();
+            // Stays dirty on failure: the timer retries.
+            let _ = s.friends.save_now();
             s.fast_retries.remove(&id);
             self.dial(s, &id);
             friend_views(s)
@@ -914,7 +1169,8 @@ impl Node {
                 self.cancel(s, &tid);
             }
             s.friends.data.retain(|f| f.id != id);
-            s.friends.save_now();
+            // Stays dirty on failure: the timer retries.
+            let _ = s.friends.save_now();
             // Still a co-member of one of our groups: keep the connection.
             if !s.is_allowed(id) {
                 if let Some(c) = s.conns.get(id) {
@@ -1043,7 +1299,8 @@ impl Node {
 
         let id = s.next_id();
         let (tx, rx) = mpsc::unbounded_channel();
-        self.spawn(write_control(send, rx));
+        let queued = Arc::new(AtomicU64::new(0));
+        self.spawn(write_control(send, rx, queued.clone()));
         self.spawn(self.clone().read_control(friend_id.clone(), id, recv));
         self.spawn(self.clone().accept_streams(friend_id.clone(), conn.clone()));
         let node = self.clone();
@@ -1061,6 +1318,7 @@ impl Node {
                 id,
                 conn,
                 tx,
+                queued,
                 since: Instant::now(),
                 outgoing,
             },
@@ -1072,6 +1330,7 @@ impl Node {
             });
         }
 
+        s.send_lan_advert(&friend_id);
         s.flush_outbox(&friend_id, true);
         let to_offer: Vec<String> = s
             .transfers
@@ -1145,6 +1404,14 @@ impl Node {
         while let Some(msg) = read_frame(&mut recv).await {
             self.with(|s| self.on_control(s, &friend_id, conn_id, &msg));
         }
+        // Nothing is read from this connection any more (oversized frame,
+        // stream closed…): close it rather than keep a peer that looks online.
+        self.with(|s| {
+            if let Some(c) = s.conns.get(&friend_id).filter(|c| c.id == conn_id) {
+                c.conn
+                    .close(VarInt::from_u32(CLOSE_NORMAL), b"control stream closed");
+            }
+        });
     }
 
     async fn accept_streams(self, friend_id: String, conn: Connection) {
@@ -1154,6 +1421,11 @@ impl Node {
     }
 
     fn on_control(&self, s: &mut State, friend_id: &str, conn_id: u64, msg: &Value) {
+        // Whatever is dropped here is sent again later (chats, offers, group
+        // syncs are all retried).
+        if s.over_limit(&format!("control:{friend_id}"), CONTROL_RATE_LIMIT) {
+            return;
+        }
         let tid = msg.get("tid").and_then(Value::as_str).filter(|t| is_tid(t));
         // Group co-members who are not friends get no private chat or offers.
         let friend = s.is_friend(friend_id);
@@ -1171,6 +1443,7 @@ impl Node {
             Some("group_entries") => self.on_group_entries(s, friend_id, msg),
             Some("blob_req") => self.on_blob_req(s, friend_id, conn_id, msg),
             Some("blob_missing") => self.on_blob_missing(s, friend_id, msg),
+            Some("lan") => self.on_lan(s, friend_id, msg),
             _ => {}
         }
     }
@@ -1198,11 +1471,12 @@ impl Node {
                 ts: now_ms(),
                 status: Some(MessageStatus::Pending),
             };
-            s.messages
-                .data
-                .entry(friend_id.to_string())
-                .or_default()
-                .push(entry.clone());
+            let list = s.messages.data.entry(friend_id.to_string()).or_default();
+            list.push(entry.clone());
+            if list.len() > MAX_HISTORY {
+                let extra = list.len() - MAX_HISTORY;
+                list.drain(..extra);
+            }
             s.messages.mark_dirty();
             if s.conns.contains_key(friend_id) {
                 s.flush_outbox(friend_id, true);
@@ -1244,11 +1518,12 @@ impl Node {
                 ts: now_ms(),
                 status: None,
             };
-            s.messages
-                .data
-                .entry(friend_id.to_string())
-                .or_default()
-                .push(entry.clone());
+            let list = s.messages.data.entry(friend_id.to_string()).or_default();
+            list.push(entry.clone());
+            if list.len() > MAX_HISTORY {
+                let extra = list.len() - MAX_HISTORY;
+                list.drain(..extra);
+            }
             s.messages.mark_dirty();
             s.events.push(Event::Message {
                 friend_id: friend_id.to_string(),
@@ -1308,17 +1583,17 @@ impl Node {
     // ── Sender side ──
 
     pub fn send_files(&self, friend_id: &str, paths: &[PathBuf]) -> usize {
-        let files: Vec<(PathBuf, u64)> = paths
+        let files: Vec<(PathBuf, u64, Option<SystemTime>)> = paths
             .iter()
             .filter_map(|p| {
                 std::fs::metadata(p)
                     .ok()
                     .filter(|m| m.is_file())
-                    .map(|m| (p.clone(), m.len()))
+                    .map(|m| (p.clone(), m.len(), m.modified().ok()))
             })
             .collect();
         self.with(|s| {
-            for (path, size) in &files {
+            for (path, size, mtime) in &files {
                 let tid = hex::encode(rand::random::<[u8; TID_BYTES]>());
                 let name = path
                     .file_name()
@@ -1332,7 +1607,9 @@ impl Node {
                     *size,
                     Status::Connecting,
                 );
-                s.transfers.get_mut(&tid).unwrap().src_path = Some(path.clone());
+                let t = s.transfers.get_mut(&tid).unwrap();
+                t.src_path = Some(path.clone());
+                t.src_mtime = *mtime;
                 if s.conns.contains_key(friend_id) {
                     self.offer(s, &tid);
                 } else {
@@ -1384,25 +1661,54 @@ impl Node {
         else {
             return;
         };
+        if offset > 0 && t.src_mtime.is_some() {
+            // Resuming: the receiver's first part must come from the same file.
+            let unchanged = t.src_path.as_ref().and_then(|p| std::fs::metadata(p).ok()).is_some_and(
+                |m| m.len() == t.file_size && m.modified().ok() == t.src_mtime,
+            );
+            if !unchanged {
+                let tid = tid.to_string();
+                s.send(friend_id, json!({ "type": "file_cancel", "tid": tid }));
+                self.stop_transfer(
+                    s,
+                    &tid,
+                    Status::Error,
+                    Some("Fichier source modifié pendant l’envoi".into()),
+                );
+                return;
+            }
+        }
         t.shared.bytes.store(offset, Ordering::Relaxed);
         t.conn_id = Some(conn_id);
         let session = t.shared.next_session();
-        let job = Job {
+        let mut job = Job {
             tid: tid.to_string(),
+            peer: friend_id.to_string(),
             shared: t.shared.clone(),
             session,
             conn,
+            lan: None,
             path: t.src_path.clone().unwrap_or_default(),
             start: offset,
             size: t.file_size,
         };
+        if self.0.lan.is_some() {
+            job.lan = s.lan_target(friend_id);
+        }
         s.set_status(tid, Status::Sending, None);
         self.spawn(self.clone().pump(job));
     }
 
-    async fn pump(self, job: Job) {
+    async fn pump(self, mut job: Job) {
         let (tid, session) = (job.tid.clone(), job.session);
-        let result = stream_file(job).await;
+        let mut sink = None;
+        if let Some(target) = job.lan.take() {
+            sink = self.lan_connect(target).await.map(|t| lan::Sink::Lan(Box::new(t)));
+            if sink.is_none() {
+                self.with(|s| self.lan_failed(s, &job.peer));
+            }
+        }
+        let result = stream_file(job, sink).await;
         self.with(|s| {
             let Some(t) = s.transfers.get(&tid) else {
                 return;
@@ -1412,9 +1718,19 @@ impl Node {
             }
             match result {
                 // Everything is on the wire: wait for the receiver's file_complete.
-                Ok(true) => s.set_status(&tid, Status::Finishing, None),
+                Ok(Streamed::Done) => s.set_status(&tid, Status::Finishing, None),
                 // Connection lost: on_close re-offers on the next connection.
-                Ok(false) => {}
+                Ok(Streamed::Stopped) => {}
+                // Go on over QUIC from where we are; the receiver asks for
+                // another offset if it has less.
+                Ok(Streamed::LanFailed) => {
+                    let (peer, conn_id, bytes) = (t.friend_id.clone(), t.conn_id, t.bytes());
+                    self.lan_failed(s, &peer);
+                    if let Some(conn_id) = conn_id {
+                        let msg = json!({ "tid": tid, "offset": bytes });
+                        self.on_accept(s, &peer, conn_id, &msg);
+                    }
+                }
                 Err(e) => {
                     s.send(
                         &t.friend_id.clone(),
@@ -1477,6 +1793,16 @@ impl Node {
             }
             return;
         }
+        // A flood of offers: ignored (a real sender offers again when it
+        // reconnects).
+        let pending = s
+            .transfers
+            .values()
+            .filter(|t| t.friend_id == friend_id && t.status == Status::Pending)
+            .count();
+        if pending >= MAX_PENDING_OFFERS || s.is_rate_limited(&format!("offer:{friend_id}")) {
+            return;
+        }
         let id = s.add_transfer(
             tid.to_string(),
             Dir::In,
@@ -1487,27 +1813,43 @@ impl Node {
         );
         s.emit_transfer(&id);
         let view = s.transfers[&id].view();
-        s.events.push(Event::FileOffer(view));
+        s.events.push(Event::FileOffer(view, 1));
     }
 
     pub fn respond_to_offer(&self, id: &str, accept: bool) {
         let dir = (self.0.download_dir)();
+        let name = self.with(|s| {
+            let t = s.transfers.get(id)?;
+            if t.dir != Dir::In || t.status != Status::Pending {
+                return None;
+            }
+            if !accept {
+                let friend_id = t.friend_id.clone();
+                s.send(&friend_id, json!({ "type": "file_reject", "tid": id }));
+                s.set_status(id, Status::Declined, None);
+                return None;
+            }
+            Some(t.file_name.clone())
+        });
+        let Some(name) = name else { return };
+        // Disk access outside the lock: the folder may be slow (network, cloud).
+        let opened = create_part(&dir, &name);
         self.with(|s| {
             let Some(t) = s.transfers.get_mut(id) else {
+                if let Ok((part, _)) = &opened {
+                    let _ = std::fs::remove_file(part);
+                }
                 return;
             };
-            if t.dir != Dir::In || t.status != Status::Pending {
+            if t.status != Status::Pending {
+                // Cancelled meanwhile.
+                if let Ok((part, _)) = &opened {
+                    let _ = std::fs::remove_file(part);
+                }
                 return;
             }
             let friend_id = t.friend_id.clone();
-            if !accept {
-                s.send(&friend_id, json!({ "type": "file_reject", "tid": id }));
-                s.set_status(id, Status::Declined, None);
-                return;
-            }
-            let part = dir.join(format!("{}.{}.part", t.file_name, &t.id[..8]));
-            let opened = std::fs::create_dir_all(&dir).and_then(|_| File::create(&part));
-            let Ok(file) = opened else {
+            let Ok((part, file)) = opened else {
                 s.send(&friend_id, json!({ "type": "file_cancel", "tid": id }));
                 s.set_status(
                     id,
@@ -1517,13 +1859,27 @@ impl Node {
                 return;
             };
             let writer = BufWriter::with_capacity(DISK_BUFFER, tokio::fs::File::from_std(file));
-            if let Ok(mut slot) = t.shared.writer.try_lock() {
-                *slot = Some(writer);
-            }
+            // Nobody else holds the writer of a transfer that was pending.
+            let Ok(mut slot) = t.shared.writer.try_lock() else {
+                let _ = std::fs::remove_file(&part);
+                s.send(&friend_id, json!({ "type": "file_cancel", "tid": id }));
+                s.set_status(id, Status::Error, Some("Erreur interne".into()));
+                return;
+            };
+            *slot = Some(writer);
+            drop(slot);
             t.part_path = Some(part);
             t.shared.bytes.store(0, Ordering::Relaxed);
+            let decision = t.decision.take();
+            let external = decision.is_some();
+            if let Some(tx) = decision {
+                let _ = tx.send(true);
+            }
             if t.file_size == 0 {
                 self.begin_finalize(s, id);
+            } else if external {
+                // The sender starts uploading once it has our answer.
+                s.set_status(id, Status::Receiving, None);
             } else if s.conns.contains_key(&friend_id) {
                 s.send(
                     &friend_id,
@@ -1539,51 +1895,73 @@ impl Node {
 
     async fn receive_stream(self, friend_id: String, mut recv: RecvStream) {
         let mut header = [0u8; DATA_HEADER];
-        if recv.read_exact(&mut header).await.is_err() {
+        let read = tokio::time::timeout(HANDSHAKE_TIMEOUT, recv.read_exact(&mut header)).await;
+        if !matches!(read, Ok(Ok(()))) {
+            let _ = recv.stop(VarInt::from_u32(0));
             return;
         }
         let tid = hex::encode(&header[..TID_BYTES]);
         let offset = u64::from_be_bytes(header[TID_BYTES..].try_into().unwrap());
+        self.receive_data(friend_id, tid, offset, lan::Source::Quic(recv))
+            .await;
+    }
+
+    /// Write a data stream for `tid` starting at `offset` into its file.
+    async fn receive_data(
+        self,
+        friend_id: String,
+        tid: String,
+        offset: u64,
+        mut recv: lan::Source,
+    ) {
         let found = self.with(|s| {
             let t = s.transfers.get(&tid)?;
             let ok = t.dir == Dir::In && t.friend_id == friend_id && t.status == Status::Receiving;
             ok.then(|| (t.shared.clone(), t.shared.session(), t.file_size))
         });
         let Some((shared, session, size)) = found else {
-            let _ = recv.stop(VarInt::from_u32(0));
+            recv.stop();
             return;
         };
 
         // Wait for any previous stream of this transfer to release the file.
         let mut slot = shared.writer.lock().await;
         let Some(writer) = slot.as_mut() else { return };
-        if shared.session() != session {
+        if shared.session() != session || offset >= size {
+            // Nothing left to receive: the file is complete or being saved.
+            recv.stop();
             return;
         }
         if offset != shared.bytes.load(Ordering::Relaxed) {
             // Stale or out-of-sync stream: ask once to resume from what we really have.
-            let _ = recv.stop(VarInt::from_u32(0));
+            recv.stop();
             drop(slot);
             self.with(|s| self.resync(s, &tid));
             return;
         }
+        let via_lan = recv.is_lan();
         self.with(|s| {
             if let Some(t) = s.transfers.get_mut(&tid) {
                 t.resyncing = false;
+                t.shared.lan.store(via_lan, Ordering::Relaxed);
             }
         });
 
         let mut cancel = shared.session.subscribe();
         let mut pos = offset;
+        let mut cut = false;
         let failure: Option<&str> = loop {
             let chunk = tokio::select! {
-                c = recv.read_chunk(CHUNK_SIZE as usize) => c,
+                c = recv.chunk() => c,
                 _ = session_changed(&mut cancel, session) => break None,
             };
             let data = match chunk {
                 Ok(Some(data)) => data,
                 // Sender restarted or connection lost: keep what we have.
-                Ok(None) | Err(_) => break None,
+                Ok(None) | Err(_) => {
+                    cut = true;
+                    break None;
+                }
             };
             if pos + data.len() as u64 > size {
                 break Some("Taille reçue incohérente");
@@ -1601,11 +1979,21 @@ impl Node {
         if failure.is_none() && shared.session() == session && writer.flush().await.is_err() {
             return self.fail(&tid, "Écriture sur le disque impossible");
         }
-        drop(slot);
+        // Still holding the file: no other stream can start finishing too.
         match failure {
-            Some(err) => self.fail(&tid, err),
+            Some(err) => {
+                drop(slot);
+                self.fail(&tid, err)
+            }
             None if pos == size && shared.session() == session => {
-                self.with(|s| self.begin_finalize(s, &tid))
+                self.with(|s| self.begin_finalize(s, &tid));
+                drop(slot);
+            }
+            // A local connection cut short while QUIC is still up: nothing
+            // else would tell the sender, which may think it is done.
+            None if cut && via_lan && shared.session() == session => {
+                drop(slot);
+                self.with(|s| self.resync(s, &tid));
             }
             None => {}
         }
@@ -1641,6 +2029,9 @@ impl Node {
         let Some(t) = s.transfers.get(tid) else {
             return;
         };
+        if t.status == Status::Finishing || t.status.is_final() {
+            return;
+        }
         let shared = t.shared.clone();
         let part = t.part_path.clone().unwrap_or_default();
         let name = t.file_name.clone();
@@ -1671,12 +2062,29 @@ impl Node {
             }
             if let Some(hash) = expected.clone() {
                 if !Node::verify_download(part.clone(), hash).await {
-                    let _ = tokio::fs::remove_file(&part).await;
-                    return node.fail(&tid, "Fichier corrompu : empreinte invalide");
+                    // The source sent something else: start over from another.
+                    return node.retry_corrupt_download(&tid, part).await;
                 }
             }
-            let target = unique_path(part.parent().unwrap_or(Path::new(".")), &name);
-            let renamed = tokio::fs::rename(&part, &target).await.is_ok();
+            let dir = part.parent().unwrap_or(Path::new(".")).to_path_buf();
+            let (part_moved, name_moved) = (part.clone(), name.clone());
+            let saved = tokio::task::spawn_blocking(move || {
+                let target = reserve_path(&dir, &name_moved)?;
+                if let Err(e) = std::fs::rename(&part_moved, &target) {
+                    let _ = std::fs::remove_file(&target);
+                    return Err(e);
+                }
+                mark_downloaded(&target);
+                Ok(target)
+            })
+            .await
+            .ok()
+            .and_then(Result::ok);
+            let renamed = saved.is_some();
+            let target = saved.unwrap_or_default();
+            if !renamed {
+                let _ = tokio::fs::remove_file(&part).await;
+            }
             node.with(|s| {
                 let Some(t) = s.transfers.get_mut(&tid) else {
                     return;
@@ -1787,28 +2195,45 @@ fn friend_views(s: &State) -> Vec<FriendView> {
         .collect()
 }
 
-async fn write_control(mut send: SendStream, mut rx: mpsc::UnboundedReceiver<Vec<u8>>) {
+async fn write_control(
+    mut send: SendStream,
+    mut rx: mpsc::UnboundedReceiver<Vec<u8>>,
+    queued: Arc<AtomicU64>,
+) {
     while let Some(frame) = rx.recv().await {
         if send.write_all(&frame).await.is_err() {
             return;
         }
+        queued.fetch_sub(frame.len() as u64, Ordering::Relaxed);
     }
 }
 
 /// One sending session of a file, from `start` to the end.
 struct Job {
     tid: String,
+    peer: String,
     shared: Arc<Shared>,
     session: u64,
     conn: Connection,
+    /// Where to try the local network first.
+    lan: Option<lan::LanTarget>,
     path: PathBuf,
     start: u64,
     size: u64,
 }
 
-/// `Ok(false)` means the connection went away or the session was replaced;
+enum Streamed {
+    /// Every byte is on the wire.
+    Done,
+    /// The connection went away or the session was replaced.
+    Stopped,
+    /// The local-network connection failed; QUIC may still be up.
+    LanFailed,
+}
+
+/// Send the file from `job.start` over `lan` if given, QUIC otherwise.
 /// `Err` is a local read failure.
-async fn stream_file(job: Job) -> Result<bool, &'static str> {
+async fn stream_file(job: Job, lan: Option<lan::Sink>) -> Result<Streamed, &'static str> {
     let Job {
         tid,
         shared,
@@ -1817,6 +2242,7 @@ async fn stream_file(job: Job) -> Result<bool, &'static str> {
         path,
         start,
         size,
+        ..
     } = job;
     let mut cancel = shared.session.subscribe();
 
@@ -1824,14 +2250,27 @@ async fn stream_file(job: Job) -> Result<bool, &'static str> {
     let (tx, mut chunks) = mpsc::channel::<io::Result<Bytes>>(4);
     tokio::task::spawn_blocking(move || read_file(path, start, size, tx));
 
-    let Ok(mut send) = conn.open_uni().await else {
-        return Ok(false);
+    let mut send = match lan {
+        Some(sink) => sink,
+        None => match conn.open_uni().await {
+            Ok(send) => lan::Sink::Quic(send),
+            Err(_) => return Ok(Streamed::Stopped),
+        },
+    };
+    let via_lan = send.is_lan();
+    shared.lan.store(via_lan, Ordering::Relaxed);
+    let broken = || {
+        if via_lan {
+            Streamed::LanFailed
+        } else {
+            Streamed::Stopped
+        }
     };
     let mut header = [0u8; DATA_HEADER];
     hex::decode_to_slice(&tid, &mut header[..TID_BYTES]).map_err(|_| "Identifiant invalide")?;
     header[TID_BYTES..].copy_from_slice(&start.to_be_bytes());
-    if send.write_all(&header).await.is_err() {
-        return Ok(false);
+    if !send.write(Bytes::copy_from_slice(&header)).await {
+        return Ok(broken());
     }
 
     let mut pos = start;
@@ -1842,8 +2281,8 @@ async fn stream_file(job: Job) -> Result<bool, &'static str> {
         };
         let data = match next {
             None => {
-                let _ = send.reset(VarInt::from_u32(0));
-                return Ok(false);
+                send.abort();
+                return Ok(Streamed::Stopped);
             }
             Some(Some(Ok(data))) if !data.is_empty() => data,
             Some(Some(Err(_))) => return Err("Lecture du fichier impossible"),
@@ -1851,27 +2290,29 @@ async fn stream_file(job: Job) -> Result<bool, &'static str> {
         };
         let len = data.len() as u64;
         let written = tokio::select! {
-            r = send.write_chunk(data) => Some(r.is_ok()),
+            ok = send.write(data) => Some(ok),
             _ = session_changed(&mut cancel, session) => None,
         };
         match written {
             Some(true) => {}
-            Some(false) => return Ok(false),
+            Some(false) => return Ok(broken()),
             None => {
-                let _ = send.reset(VarInt::from_u32(0));
-                return Ok(false);
+                send.abort();
+                return Ok(Streamed::Stopped);
             }
         }
         pos += len;
         // A replaced session must not overwrite the new session's offset.
         if shared.session() != session {
-            let _ = send.reset(VarInt::from_u32(0));
-            return Ok(false);
+            send.abort();
+            return Ok(Streamed::Stopped);
         }
         shared.bytes.store(pos, Ordering::Relaxed);
     }
-    let _ = send.finish();
-    Ok(true)
+    if !send.finish().await {
+        return Ok(broken());
+    }
+    Ok(Streamed::Done)
 }
 
 fn read_file(path: PathBuf, start: u64, size: u64, tx: mpsc::Sender<io::Result<Bytes>>) {
@@ -1911,6 +2352,12 @@ mod tests {
         assert_eq!(sanitize_file_name("C:\\dir\\a<b>.txt"), "a_b_.txt");
         assert_eq!(sanitize_file_name("con.txt"), "_con.txt");
         assert_eq!(sanitize_file_name("COM1"), "_COM1");
+        assert_eq!(sanitize_file_name("nul .txt"), "_nul .txt");
+        assert_eq!(sanitize_file_name("CONIN$"), "_CONIN$");
+        assert_eq!(sanitize_file_name("lpt¹.log"), "_lpt¹.log");
+        assert_eq!(sanitize_file_name("computer.txt"), "computer.txt");
+        assert_eq!(sanitize_file_name("facture\u{202E}fdp.exe"), "facturefdp.exe");
+        assert_eq!(sanitize_file_name("a\u{200B}b\u{FEFF}.txt"), "ab.txt");
         assert_eq!(sanitize_file_name("trail. . "), "trail");
         assert_eq!(sanitize_file_name(".."), "fichier");
         assert_eq!(sanitize_file_name(""), "fichier");
@@ -1918,6 +2365,32 @@ mod tests {
         let s = sanitize_file_name(&long);
         assert_eq!(s.chars().count(), 180);
         assert!(s.ends_with(".extension"));
+    }
+
+    #[test]
+    fn recognizes_risky_and_part_files() {
+        assert!(is_executable("setup.EXE") && is_executable("a.lnk"));
+        assert!(!is_executable("photo.jpg") && !is_executable("exe"));
+        assert!(is_part_file("rapport.pdf.0a1b2c3d.part"));
+        assert!(!is_part_file("rapport.part") && !is_part_file("x.0a1b2c3g.part"));
+    }
+
+    #[test]
+    fn reserves_distinct_names() {
+        let dir = std::env::temp_dir().join(format!("p2p-test-{}", now_ms()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = reserve_path(&dir, "x.txt").unwrap();
+        let b = reserve_path(&dir, "x.txt").unwrap();
+        assert_eq!(a.file_name().unwrap(), "x.txt");
+        assert_eq!(b.file_name().unwrap(), "x (1).txt");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn plain_http_relay_only_on_this_computer() {
+        assert!(CustomRelay::parse("http://relay.example.com", "").is_err());
+        assert!(CustomRelay::parse("http://localhost:3340", "").is_ok());
+        assert!(CustomRelay::parse("relay.example.com", "").is_ok());
     }
 
     #[test]

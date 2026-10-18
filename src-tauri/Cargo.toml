@@ -1,6 +1,6 @@
 [package]
 name = "p2pshare"
-version = "3.2.0"
+version = "3.3.0"
 description = "Partage de fichiers et chat en pair-à-pair"
 authors = ["lamzii"]
 license = "MIT"
@@ -21,7 +21,7 @@ tauri-plugin-opener = "2"
 tauri-plugin-autostart = "2"
 tauri-plugin-single-instance = "2"
 iroh = "1.3"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "io-util"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "io-util", "net"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 blake3 = "1"
@@ -30,6 +30,15 @@ hex = "0.4"
 rand = "0.9"
 uuid = { version = "1", features = ["v4"] }
 url = "2"
+rcgen = { version = "0.14.7", default-features = false, features = ["crypto", "ring"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+hyper = { version = "1", features = ["server", "client", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+ring = "0.17"
+socket2 = { version = "0.6", features = ["all"] }
+netdev = "0.46"
 
 [target.'cfg(windows)'.dependencies]
 tauri-winrt-notification = "0.8"

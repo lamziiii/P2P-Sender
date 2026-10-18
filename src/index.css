@@ -331,6 +331,17 @@ svg {
   padding: 4px 2px 0;
 }
 
+.section-header-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.icon-btn.small {
+  width: 24px;
+  height: 24px;
+}
+
 .list {
   display: flex;
   flex-direction: column;
@@ -538,6 +549,14 @@ svg {
   margin-bottom: 10px;
   line-height: 1.4;
   word-break: break-word;
+}
+
+.offer-text {
+  color: var(--text);
+  white-space: pre-wrap;
+  max-height: 120px;
+  overflow-y: auto;
+  user-select: text;
 }
 
 .offer-desc strong {

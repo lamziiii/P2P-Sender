@@ -10,10 +10,13 @@ export function RelaySettings({ config }: { config: Partial<Config> }) {
   const [error, setError] = useState('');
   const [applying, setApplying] = useState(false);
 
-  useEffect(() => {
+  // Follow the saved setting when it loads or changes.
+  const [saved, setSaved] = useState([config.relayUrl, config.relayToken]);
+  if (saved[0] !== config.relayUrl || saved[1] !== config.relayToken) {
+    setSaved([config.relayUrl, config.relayToken]);
     setUrl(config.relayUrl ?? '');
     setToken(config.relayToken ?? '');
-  }, [config.relayUrl, config.relayToken]);
+  }
 
   useEffect(() => {
     const load = () => api.getRelayStatus().then(setStatus);
@@ -23,6 +26,13 @@ export function RelaySettings({ config }: { config: Partial<Config> }) {
   }, []);
 
   const norm = (u: string) => u.trim().replace(/\/+$/, '');
+  const host = (u: string) => {
+    try {
+      return new URL(u).host;
+    } catch {
+      return u;
+    }
+  };
   const changed = norm(url) !== norm(config.relayUrl ?? '') || token.trim() !== (config.relayToken ?? '');
 
   const apply = async (newUrl: string, newToken: string) => {
@@ -56,7 +66,7 @@ export function RelaySettings({ config }: { config: Partial<Config> }) {
         {status === null
           ? 'Connexion au relais…'
           : status.connected
-            ? <span style={{ color: 'var(--success)' }}>Connecté à {status.custom ? 'votre relais' : 'un relais public'} ({new URL(status.url).host})</span>
+            ? <span style={{ color: 'var(--success)' }}>Connecté à {status.custom ? 'votre relais' : 'un relais public'} ({host(status.url)})</span>
             : <span style={{ color: 'var(--danger)' }}>Relais injoignable{status.error ? ` : ${status.error}` : ''}</span>}
       </div>
       <div className="setting-sub" style={{ marginTop: 6 }}>

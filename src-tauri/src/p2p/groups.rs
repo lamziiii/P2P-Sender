@@ -19,7 +19,13 @@ use super::*;
 use crate::group::{self, Body, Have, Log, Op, SignedEntry, View};
 
 const FRAME_BUDGET: usize = 128 * 1024;
-const REPO_FOLDER: &str = "P2PShare";
+pub(super) const REPO_FOLDER: &str = "P2PShare";
+/// Invitations waiting for an answer.
+const MAX_INVITES: usize = 50;
+/// Shared files one member may download from us at the same time.
+const MAX_SERVES_PER_PEER: usize = 4;
+/// Entries dated further in the future are refused until that time comes.
+const MAX_CLOCK_SKEW_MS: u64 = 5 * 60 * 1000;
 
 // ─── Stored state ────────────────────────────────────────────────────────────
 
@@ -47,6 +53,10 @@ pub struct GroupMeta {
     /// We left: kept only until a member has our leave entry.
     #[serde(default)]
     pub left: bool,
+    /// Creator of a group whose id does not name it (older groups), as
+    /// first seen: see `Log::pinned_creator`.
+    #[serde(default)]
+    pub creator: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -76,6 +86,8 @@ pub(super) struct Repo {
     pub gid: String,
     pub hash: String,
     pub tried: HashSet<String>,
+    /// Members who sent a copy that did not match the hash: never asked again.
+    pub bad: HashSet<String>,
 }
 
 // ─── Views for the UI ────────────────────────────────────────────────────────
@@ -117,6 +129,8 @@ pub struct MemberView {
     pub online: bool,
     pub friend: bool,
     pub me: bool,
+    /// We may remove them (we created the group or added them).
+    pub removable: bool,
 }
 
 #[derive(Serialize)]
@@ -184,21 +198,32 @@ fn log_path(dir: &Path, gid: &str) -> PathBuf {
 /// Load every group log from disk (our own files: signatures were checked
 /// when the entries arrived).
 pub(super) fn load(dir: &Path) -> (JsonStore<GroupsMeta>, HashMap<String, GroupState>) {
-    let meta = JsonStore::load(dir.join("groups.json"), GroupsMeta::default());
+    let mut meta = JsonStore::load(dir.join("groups.json"), GroupsMeta::default());
     let mut groups = HashMap::new();
-    for g in &meta.data.groups {
+    let mut pinned = false;
+    for g in &mut meta.data.groups {
         let mut log = Log::new(&g.id);
-        if let Ok(text) = std::fs::read_to_string(log_path(dir, &g.id)) {
-            for line in text.lines() {
-                let entry = serde_json::from_str::<SignedEntry>(line)
-                    .ok()
-                    .and_then(|s| group::parse(s, &g.id, false));
-                if let Some(entry) = entry {
-                    log.insert(entry);
-                }
+        log.pinned_creator = g.creator.clone();
+        let path = log_path(dir, &g.id);
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            // A line cut short by a crash would swallow the next one appended.
+            if !text.is_empty() && !text.ends_with('\n') {
+                let _ = append_lines(&path, "\n");
             }
+            let entries = text
+                .lines()
+                .filter_map(|line| serde_json::from_str::<SignedEntry>(line).ok())
+                .filter_map(|s| group::parse(s, &g.id, false))
+                .collect();
+            log.insert_all(entries);
         }
         log.rebuild();
+        log.drop_strangers();
+        if g.creator.is_none() && !log.view.creator.is_empty() {
+            g.creator = Some(log.view.creator.clone());
+            log.pinned_creator = g.creator.clone();
+            pinned = true;
+        }
         groups.insert(
             g.id.clone(),
             GroupState {
@@ -207,6 +232,9 @@ pub(super) fn load(dir: &Path) -> (JsonStore<GroupsMeta>, HashMap<String, GroupS
                 unsaved: Vec::new(),
             },
         );
+    }
+    if pinned {
+        meta.mark_dirty();
     }
     (meta, groups)
 }
@@ -263,9 +291,12 @@ impl State {
         if let Some(f) = self.friends.data.iter().find(|f| f.id == id) {
             return f.name.clone();
         }
+        // Not a friend: the nickname is theirs to choose, so it always comes
+        // with the start of their id and cannot pass for a friend.
+        let short = &id[..6.min(id.len())];
         match view.nicks.get(id) {
-            Some(n) if !n.is_empty() => n.clone(),
-            _ => format!("Membre {}", &id[..6.min(id.len())]),
+            Some(n) if !n.is_empty() => format!("{n} ({short})"),
+            _ => format!("Membre {short}"),
         }
     }
 
@@ -285,7 +316,9 @@ impl State {
         let mut batch: Vec<&SignedEntry> = Vec::new();
         let mut size = 0;
         for e in entries {
-            if size + e.body.len() > FRAME_BUDGET && !batch.is_empty() {
+            // The size once in the frame: quotes in the body get escaped.
+            let len = serde_json::to_vec(e).map(|v| v.len()).unwrap_or(0) + 1;
+            if size + len > FRAME_BUDGET && !batch.is_empty() {
                 self.send(
                     peer,
                     json!({ "type": "group_entries", "gid": gid, "entries": batch }),
@@ -293,7 +326,7 @@ impl State {
                 batch.clear();
                 size = 0;
             }
-            size += e.body.len() + e.sig.len() + 32;
+            size += len;
             batch.push(e);
         }
         if !batch.is_empty() {
@@ -392,11 +425,9 @@ pub(super) fn append_lines(path: &Path, lines: &str) -> io::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)?
-        .write_all(lines.as_bytes())
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    file.write_all(lines.as_bytes())?;
+    file.sync_data()
 }
 
 // ─── Node: groups ────────────────────────────────────────────────────────────
@@ -424,9 +455,16 @@ impl Node {
         let Some(entry) = group::parse(signed.clone(), gid, false) else {
             return false;
         };
-        g.log.insert(entry);
+        // On disk before anyone sees it: after a crash we must not sign
+        // something else with the same seq.
+        let line = serde_json::to_string(&signed).unwrap_or_default() + "\n";
+        if append_lines(&log_path(&s.groups_dir, gid), &line).is_err() {
+            return false;
+        }
+        if !g.log.insert(entry) {
+            return false;
+        }
         g.log.rebuild();
-        g.unsaved.push(signed.clone());
         let gone: Vec<String> = before
             .into_iter()
             .filter(|m| !g.log.view.is_member(m))
@@ -538,7 +576,9 @@ impl Node {
         if s.groups.contains_key(gid) || s.gmeta.data.declined.contains(&via) {
             return;
         }
-        if s.gmeta.data.invites.iter().any(|i| i.gid == gid) {
+        if s.gmeta.data.invites.iter().any(|i| i.gid == gid)
+            || s.gmeta.data.invites.len() >= MAX_INVITES
+        {
             return;
         }
         s.gmeta.data.invites.push(Invite {
@@ -652,23 +692,31 @@ impl Node {
         let was_member = g.log.view.is_member(&me);
         let known_msgs: HashSet<String> =
             g.log.view.messages.iter().map(|m| m.id.clone()).collect();
-        let mut new = Vec::new();
-        for item in list {
-            let Ok(signed) = serde_json::from_value::<SignedEntry>(item.clone()) else {
-                continue;
-            };
-            let Some(entry) = group::parse(signed.clone(), &gid, true) else {
-                continue;
-            };
-            if g.log.insert(entry) {
-                new.push(signed);
-            }
-        }
-        if new.is_empty() {
+        let latest = now_ms().saturating_add(MAX_CLOCK_SKEW_MS);
+        let entries = list
+            .iter()
+            .filter_map(|item| serde_json::from_value::<SignedEntry>(item.clone()).ok())
+            .filter_map(|signed| group::parse(signed, &gid, true))
+            .filter(|e| e.t <= latest)
+            .collect();
+        let added = g.log.insert_all(entries);
+        if added.is_empty() {
             return;
         }
         g.log.rebuild();
+        // Entries of strangers are neither kept nor passed on.
+        g.log.drop_strangers();
+        let new: Vec<SignedEntry> = added
+            .into_iter()
+            .filter(|e| {
+                group::parse(e.clone(), &gid, false).is_some_and(|e| g.log.has_entry_of(&e.a))
+            })
+            .collect();
+        if new.is_empty() {
+            return;
+        }
         g.unsaved.extend(new.iter().cloned());
+        let creator = g.log.view.creator.clone();
         let is_member = g.log.view.is_member(&me);
         let fresh: Vec<group::Message> = g
             .log
@@ -679,6 +727,17 @@ impl Node {
             .cloned()
             .collect();
 
+        if !creator.is_empty() {
+            if let Some(m) = s.gmeta.data.groups.iter_mut().find(|m| m.id == gid) {
+                if m.creator.is_none() {
+                    m.creator = Some(creator.clone());
+                    s.gmeta.mark_dirty();
+                    if let Some(g) = s.groups.get_mut(&gid) {
+                        g.log.pinned_creator = Some(creator);
+                    }
+                }
+            }
+        }
         s.broadcast(&gid, &new, Some(peer));
         s.send_have(peer, &gid);
 
@@ -790,7 +849,9 @@ impl Node {
         if members.len() + 1 > group::MAX_MEMBERS {
             return Err("too_many");
         }
-        let gid = hex::encode(rand::random::<[u8; 16]>());
+        // The id names us as the creator: nobody else can write its creation.
+        let nonce = hex::encode(rand::random::<[u8; 16]>());
+        let gid = group::group_id(&self.id(), &nonce);
         self.with(|s| {
             s.groups.insert(
                 gid.clone(),
@@ -805,9 +866,17 @@ impl Node {
                 last_read: 0,
                 joined: now_ms(),
                 left: false,
+                creator: Some(s.me.clone()),
             });
             s.gmeta.mark_dirty();
-            self.post(s, &gid, Op::Create { name });
+            self.post(
+                s,
+                &gid,
+                Op::Create {
+                    name,
+                    nonce: Some(nonce),
+                },
+            );
             self.post_profile(s, &gid);
             self.add_members_locked(s, &gid, members);
         });
@@ -849,7 +918,11 @@ impl Node {
             return self.group_leave(gid);
         }
         self.with(|s| {
-            if s.member_of(gid) && s.groups[gid].log.view.is_member(member) {
+            let allowed = s.member_of(gid) && {
+                let v = &s.groups[gid].log.view;
+                v.is_member(member) && v.can_remove(&s.me, member)
+            };
+            if allowed {
                 self.post(
                     s,
                     gid,
@@ -948,6 +1021,7 @@ impl Node {
                 last_read: 0,
                 joined: 0,
                 left: false,
+                creator: None,
             });
             // Ask the inviter (and any connected friend) for the log.
             let friends: Vec<String> = s.conns.keys().filter(|p| s.is_friend(p)).cloned().collect();
@@ -976,6 +1050,7 @@ impl Node {
                     online: *m == s.me || s.conns.contains_key(m),
                     friend: s.is_friend(m),
                     me: *m == s.me,
+                    removable: *m != s.me && v.can_remove(&s.me, m),
                 })
                 .collect();
             members.sort_by_key(|m| (!m.me, !m.online, m.name.to_lowercase()));
@@ -1153,19 +1228,14 @@ impl Node {
 
     pub fn group_delete_file(&self, gid: &str, file_id: &str) {
         self.with(|s| {
-            let mine = s
+            let entry_id = s
                 .groups
                 .get(gid)
                 .and_then(|g| g.log.view.files.get(file_id))
-                .is_some_and(|f| f.author == s.me);
-            if mine && s.member_of(gid) {
-                self.post(
-                    s,
-                    gid,
-                    Op::FileDel {
-                        id: file_id.to_string(),
-                    },
-                );
+                .filter(|f| f.author == s.me)
+                .map(|f| f.entry_id.clone());
+            if let Some(id) = entry_id.filter(|_| s.member_of(gid)) {
+                self.post(s, gid, Op::FileDel { id });
             }
         });
     }
@@ -1210,10 +1280,8 @@ impl Node {
                 .join(REPO_FOLDER)
                 .join(sanitize_file_name(&g.log.view.name));
             let tid = hex::encode(rand::random::<[u8; TID_BYTES]>());
-            let part = dir.join(format!("{}.{}.part", f.name, &tid[..8]));
-            let file = std::fs::create_dir_all(&dir)
-                .and_then(|_| File::create(&part))
-                .map_err(|_| "Dossier de téléchargement inaccessible")?;
+            let (part, file) =
+                create_part(&dir, &f.name).map_err(|_| "Dossier de téléchargement inaccessible")?;
             s.add_transfer(
                 tid.clone(),
                 Dir::In,
@@ -1234,6 +1302,7 @@ impl Node {
                 gid: gid.to_string(),
                 hash: f.hash.clone(),
                 tried: HashSet::new(),
+                bad: HashSet::new(),
             });
             if f.size == 0 {
                 self.begin_finalize(s, &tid);
@@ -1269,7 +1338,12 @@ impl Node {
                     .view
                     .members
                     .keys()
-                    .filter(|m| **m != s.me && s.conns.contains_key(*m) && !repo.tried.contains(*m))
+                    .filter(|m| {
+                        **m != s.me
+                            && s.conns.contains_key(*m)
+                            && !repo.tried.contains(*m)
+                            && !repo.bad.contains(*m)
+                    })
                     .cloned()
                     .collect()
             })
@@ -1361,10 +1435,20 @@ impl Node {
             .get(&hash)
             .filter(|h| holding_valid(h))
             .cloned();
+        let serving = s
+            .transfers
+            .values()
+            .filter(|t| t.serve && t.friend_id == peer && !t.status.is_final())
+            .count();
         let (Some(file), Some(holding)) = (listed, holding) else {
             s.send(peer, json!({ "type": "blob_missing", "tid": tid }));
             return;
         };
+        let replaces = s.transfers.get(tid).is_some_and(|t| !t.status.is_final());
+        if offset > holding.size || (serving >= MAX_SERVES_PER_PEER && !replaces) {
+            s.send(peer, json!({ "type": "blob_missing", "tid": tid }));
+            return;
+        }
         if let Some(old) = s.transfers.get(tid) {
             if !(old.serve && old.friend_id == peer) {
                 return;
@@ -1391,6 +1475,49 @@ impl Node {
         tokio::task::spawn_blocking(move || hash_file(&part).is_ok_and(|h| h == hash))
             .await
             .unwrap_or(false)
+    }
+
+    /// A finished download did not match its hash: never ask that member
+    /// again, and start over from another one.
+    pub(super) async fn retry_corrupt_download(&self, tid: &str, part: PathBuf) {
+        let reopened = tokio::fs::File::create(&part).await;
+        self.with(|s| {
+            let still = s
+                .transfers
+                .get(tid)
+                .is_some_and(|t| t.status == Status::Finishing);
+            let file = match reopened {
+                Ok(file) if still => file,
+                _ => {
+                    let _ = std::fs::remove_file(&part);
+                    if still {
+                        self.stop_transfer(
+                            s,
+                            tid,
+                            Status::Error,
+                            Some("Fichier corrompu : empreinte invalide".into()),
+                        );
+                    }
+                    return;
+                }
+            };
+            let t = s.transfers.get_mut(tid).unwrap();
+            let source = t.friend_id.clone();
+            t.shared.next_session();
+            t.shared.bytes.store(0, Ordering::Relaxed);
+            if let Ok(mut slot) = t.shared.writer.try_lock() {
+                *slot = Some(BufWriter::with_capacity(DISK_BUFFER, file));
+            }
+            if let Some(repo) = t.repo.as_mut() {
+                repo.bad.insert(source);
+            }
+            s.set_status(
+                tid,
+                Status::Paused,
+                Some("Copie corrompue reçue : nouvelle tentative".into()),
+            );
+            self.pick_source(s, tid);
+        });
     }
 
     pub(super) fn record_download(&self, s: &mut State, tid: &str, target: &Path) {

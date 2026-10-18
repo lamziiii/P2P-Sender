@@ -32,7 +32,7 @@ jobs:
 
     steps:
       - name: Check out git repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install Linux system dependencies
         if: runner.os == 'Linux'
@@ -41,16 +41,16 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev patchelf
 
       - name: Install Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: 22
           cache: 'npm'
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
 
       - name: Cache Rust build
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: src-tauri
 
@@ -64,7 +64,7 @@ jobs:
         run: npx tauri build
 
       - name: Upload installers
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: P2PShare-${{ matrix.os }}
           path: |
@@ -81,13 +81,23 @@ jobs:
       contents: write
     steps:
       - name: Download installers
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           path: ./artifacts
           merge-multiple: true
 
+      # Lets users check what they downloaded (the installers are not signed).
+      - name: Compute checksums
+        run: |
+          cd artifacts
+          find . -type f \( -name '*.exe' -o -name '*.dmg' -o -name '*.AppImage' \) -print0 |
+            while IFS= read -r -d '' f; do
+              echo "$(sha256sum "$f" | cut -d' ' -f1)  $(basename "$f")"
+            done > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
       - name: Create release
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
         with:
           name: P2PShare ${{ github.ref_name }}
           # Each installer sits in its bundle folder (nsis/, dmg/, appimage/).
@@ -95,6 +105,7 @@ jobs:
             artifacts/**/*.exe
             artifacts/**/*.dmg
             artifacts/**/*.AppImage
+            artifacts/SHA256SUMS.txt
           fail_on_unmatched_files: true
           make_latest: true
           generate_release_notes: true
@@ -108,3 +119,35 @@ jobs:
             - **Linux** : `P2PShare_*_amd64.AppImage`
 
             La version 3 n'échange pas avec les versions 2.x (Electron) : vos amis doivent aussi passer à la v3. Votre ID, vos amis et vos messages sont repris automatiquement.
+
+  # Sends the new version to winget (a pull request to microsoft/winget-pkgs,
+  # merged after Microsoft's checks). Needs a WINGET_TOKEN secret: a classic
+  # GitHub token with the public_repo scope. The very first version was
+  # submitted by hand; until it is accepted, there is nothing to update.
+  winget:
+    needs: publish
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: windows-latest
+    steps:
+      - name: Submit to winget
+        shell: pwsh
+        env:
+          WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          if (-not $env:WINGET_TOKEN) {
+            Write-Output "::notice::WINGET_TOKEN is not set: winget not updated"
+            exit 0
+          }
+          $headers = @{ Authorization = "Bearer $env:WINGET_TOKEN" }
+          try {
+            Invoke-RestMethod -Headers $headers https://api.github.com/repos/microsoft/winget-pkgs/contents/manifests/l/lamzii/P2PShare | Out-Null
+          } catch {
+            Write-Output "::notice::lamzii.P2PShare is not on winget yet: nothing to update"
+            exit 0
+          }
+          $version = $env:TAG.TrimStart('v')
+          $url = "https://github.com/$env:REPO/releases/download/$env:TAG/P2PShare_${version}_x64-setup.exe"
+          Invoke-WebRequest https://aka.ms/wingetcreate/latest -OutFile wingetcreate.exe
+          ./wingetcreate.exe update lamzii.P2PShare --version $version --urls $url --token $env:WINGET_TOKEN --submit

@@ -10,6 +10,12 @@
 //! every member computes the same way: (timestamp, author, seq). An entry
 //! only counts if its author is a member at that point, so concurrent
 //! removals resolve the same way everywhere: the first one wins.
+//!
+//! Timestamps are chosen by authors, so the rules never trust them alone:
+//! the group id is derived from its creator's key (nobody else can create
+//! it), an author's entries are only kept in seq order with increasing
+//! timestamps, and only the creator or whoever added a member may remove
+//! them (anyone may leave).
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::str::FromStr;
@@ -21,6 +27,7 @@ pub const MAX_MEMBERS: usize = 32;
 pub const MAX_NAME: usize = 60;
 pub const MAX_NICK: usize = 40;
 pub const MAX_BODY: usize = 64 * 1024;
+pub const MAX_TEXT: usize = 5000;
 
 /// Seq per author up to which a peer has every entry.
 pub type Have = HashMap<String, u64>;
@@ -47,6 +54,10 @@ pub struct Body {
 pub enum Op {
     Create {
         name: String,
+        /// With the creator's key, gives the group id (see `group_id`).
+        /// Absent in groups made before it existed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        nonce: Option<String>,
     },
     Add {
         member: String,
@@ -92,6 +103,13 @@ pub struct Entry {
     pub t: u64,
     /// None for kinds from a newer version: kept and relayed, not applied.
     pub op: Option<Op>,
+}
+
+/// The id of a group created by `creator` with `nonce`: nobody else can
+/// write a creation entry that matches it.
+pub fn group_id(creator: &str, nonce: &str) -> String {
+    let hash = blake3::hash(format!("{creator}:{nonce}").as_bytes());
+    hash.to_hex()[..32].to_string()
 }
 
 pub fn sign(secret: &SecretKey, body: &Body) -> SignedEntry {
@@ -142,7 +160,12 @@ pub struct Message {
 
 #[derive(Clone, Serialize)]
 pub struct SharedFile {
+    /// "author/entry id": entry ids are chosen by authors, so two authors
+    /// can never claim the same file.
     pub id: String,
+    /// The id in the author's entries (what `FileDel` names).
+    #[serde(skip)]
+    pub entry_id: String,
     pub name: String,
     pub size: u64,
     pub hash: String,
@@ -161,12 +184,22 @@ pub struct View {
     pub files: BTreeMap<String, SharedFile>,
     /// (author, seq) of the entry that last added each member.
     pub added_by: HashMap<String, (String, u64)>,
+    /// Everyone who was a member at some point.
+    pub ever: HashSet<String>,
     pub max_t: u64,
 }
 
 impl View {
     pub fn is_member(&self, id: &str) -> bool {
         self.members.contains_key(id)
+    }
+
+    /// Whether `by` may remove `member`: themselves, or as the group's
+    /// creator, or as whoever added them.
+    pub fn can_remove(&self, by: &str, member: &str) -> bool {
+        by == member
+            || by == self.creator
+            || self.added_by.get(member).is_some_and(|(a, _)| a == by)
     }
 }
 
@@ -175,6 +208,10 @@ pub struct Log {
     pub id: String,
     entries: HashMap<String, BTreeMap<u64, Entry>>,
     pub view: View,
+    /// For groups made before ids were tied to their creator: the creator
+    /// seen when we first had the log, so a later forged creation entry
+    /// cannot take the group over.
+    pub pinned_creator: Option<String>,
 }
 
 impl Log {
@@ -189,27 +226,52 @@ impl Log {
         self.entries.is_empty()
     }
 
-    /// Add an entry; returns false if it was already known.
+    /// Add an entry; returns false if it was already known or cannot be
+    /// kept: an author's entries are kept in seq order without gaps, each
+    /// with a later timestamp than the one before.
     pub fn insert(&mut self, entry: Entry) -> bool {
         let by_author = self.entries.entry(entry.a.clone()).or_default();
-        if by_author.contains_key(&entry.n) {
+        let last = by_author.last_key_value().map(|(n, e)| (*n, e.t));
+        let fits = match last {
+            None => entry.n == 1,
+            Some((n, t)) => Some(entry.n) == n.checked_add(1) && entry.t > t,
+        };
+        if !fits {
+            if by_author.is_empty() {
+                self.entries.remove(&entry.a);
+            }
             return false;
         }
         by_author.insert(entry.n, entry);
         true
     }
 
+    /// Insert entries in any order; returns those that were kept.
+    pub fn insert_all(&mut self, mut entries: Vec<Entry>) -> Vec<SignedEntry> {
+        entries.sort_by(|x, y| (&x.a, x.n).cmp(&(&y.a, y.n)));
+        let mut kept = Vec::new();
+        for e in entries {
+            let signed = e.signed.clone();
+            if self.insert(e) {
+                kept.push(signed);
+            }
+        }
+        kept
+    }
+
+    /// After a rebuild, forget the entries of authors who were never
+    /// members. Entries that arrived before the one adding their author come
+    /// back on the next sync.
+    pub fn drop_strangers(&mut self) {
+        let ever = &self.view.ever;
+        self.entries.retain(|a, _| ever.contains(a));
+    }
+
     pub fn have(&self) -> Have {
         self.entries
             .iter()
             .map(|(author, list)| {
-                let mut top = 0;
-                for n in list.keys() {
-                    if *n != top + 1 {
-                        break;
-                    }
-                    top = *n;
-                }
+                let top = list.keys().next_back().copied().unwrap_or(0);
                 (author.clone(), top)
             })
             .collect()
@@ -220,7 +282,10 @@ impl Log {
         let mut out = Vec::new();
         for (author, list) in &self.entries {
             let known = have.get(author).copied().unwrap_or(0);
-            out.extend(list.range(known + 1..).map(|(_, e)| e.signed.clone()));
+            let Some(from) = known.checked_add(1) else {
+                continue;
+            };
+            out.extend(list.range(from..).map(|(_, e)| e.signed.clone()));
         }
         out
     }
@@ -241,10 +306,50 @@ impl Log {
             .and_then(|l| l.keys().next_back().copied())
             .unwrap_or(0)
             + 1;
-        (n, now.max(self.view.max_t + 1))
+        let last_t = self
+            .entries
+            .get(author)
+            .and_then(|l| l.values().next_back())
+            .map(|e| e.t)
+            .unwrap_or(0);
+        let t = now
+            .max(self.view.max_t.saturating_add(1))
+            .max(last_t.saturating_add(1));
+        (n, t)
+    }
+
+    /// The author of the entry that created the group: the one matching the
+    /// group id; for older groups, the pinned creator, or else the earliest.
+    fn creator(&self) -> Option<String> {
+        let creations: Vec<(&Entry, Option<&String>)> = self
+            .entries
+            .values()
+            .filter_map(|l| l.get(&1))
+            .filter_map(|e| match &e.op {
+                Some(Op::Create { nonce, .. }) => Some((e, nonce.as_ref())),
+                _ => None,
+            })
+            .collect();
+        let bound = creations
+            .iter()
+            .find(|(e, nonce)| nonce.is_some_and(|n| group_id(&e.a, n) == self.id));
+        if let Some((e, _)) = bound {
+            return Some(e.a.clone());
+        }
+        let mut legacy = creations
+            .iter()
+            .filter(|(_, nonce)| nonce.is_none())
+            .map(|(e, _)| *e);
+        match &self.pinned_creator {
+            Some(p) => legacy.find(|e| e.a == *p).map(|e| e.a.clone()),
+            None => legacy
+                .min_by(|x, y| (x.t, &x.a).cmp(&(y.t, &y.a)))
+                .map(|e| e.a.clone()),
+        }
     }
 
     pub fn rebuild(&mut self) {
+        let creator = self.creator();
         let mut ordered: Vec<&Entry> = self.entries.values().flat_map(|l| l.values()).collect();
         ordered.sort_by(|x, y| (x.t, &x.a, x.n).cmp(&(y.t, &y.a, y.n)));
 
@@ -252,11 +357,12 @@ impl Log {
         for e in ordered {
             v.max_t = v.max_t.max(e.t);
             let Some(op) = &e.op else { continue };
-            if let Op::Create { name } = op {
-                if v.creator.is_empty() {
+            if let Op::Create { name, .. } = op {
+                if e.n == 1 && creator.as_ref() == Some(&e.a) {
                     v.creator = e.a.clone();
                     v.name = clip(name, MAX_NAME);
                     v.members.insert(e.a.clone(), e.t);
+                    v.ever.insert(e.a.clone());
                 }
                 continue;
             }
@@ -270,10 +376,13 @@ impl Log {
                     if valid && !v.is_member(member) && v.members.len() < MAX_MEMBERS {
                         v.members.insert(member.clone(), e.t);
                         v.added_by.insert(member.clone(), (e.a.clone(), e.n));
+                        v.ever.insert(member.clone());
                     }
                 }
                 Op::Remove { member } => {
-                    v.members.remove(member);
+                    if v.can_remove(&e.a, member) {
+                        v.members.remove(member);
+                    }
                 }
                 Op::Rename { name } => {
                     let name = clip(name, MAX_NAME);
@@ -287,9 +396,9 @@ impl Log {
                 Op::Msg { id, text } => {
                     if !text.trim().is_empty() {
                         v.messages.push(Message {
-                            id: id.clone(),
+                            id: format!("{}/{id}", e.a),
                             author: e.a.clone(),
-                            text: text.clone(),
+                            text: text.chars().take(MAX_TEXT).collect(),
                             ts: e.t,
                             seq: e.n,
                         });
@@ -303,11 +412,13 @@ impl Log {
                 } => {
                     let well_formed =
                         hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit());
-                    if well_formed && !v.files.contains_key(id) {
+                    let key = format!("{}/{id}", e.a);
+                    if well_formed && !v.files.contains_key(&key) {
                         v.files.insert(
-                            id.clone(),
+                            key.clone(),
                             SharedFile {
-                                id: id.clone(),
+                                id: key,
+                                entry_id: id.clone(),
                                 name: crate::p2p::sanitize_file_name(name),
                                 size: *size,
                                 hash: hash.to_lowercase(),
@@ -318,9 +429,7 @@ impl Log {
                     }
                 }
                 Op::FileDel { id } => {
-                    if v.files.get(id).is_some_and(|f| f.author == e.a) {
-                        v.files.remove(id);
-                    }
+                    v.files.remove(&format!("{}/{id}", e.a));
                 }
             }
         }
@@ -345,7 +454,7 @@ impl Log {
 }
 
 fn clip(s: &str, max: usize) -> String {
-    s.trim().chars().take(max).collect()
+    crate::p2p::strip_invisible(s).trim().chars().take(max).collect()
 }
 
 #[cfg(test)]
@@ -363,8 +472,7 @@ mod tests {
         Member { key, id }
     }
 
-    fn post(log: &mut Log, m: &Member, t: u64, op: Op) -> SignedEntry {
-        let (n, _) = log.next_position(&m.id, 0);
+    fn entry(log: &Log, m: &Member, n: u64, t: u64, op: Op) -> Entry {
         let body = Body {
             g: log.id.clone(),
             a: m.id.clone(),
@@ -372,9 +480,14 @@ mod tests {
             t,
             op,
         };
-        let signed = sign(&m.key, &body);
-        let gid = log.id.clone();
-        log.insert(parse(signed.clone(), &gid, true).unwrap());
+        parse(sign(&m.key, &body), &log.id, true).unwrap()
+    }
+
+    fn post(log: &mut Log, m: &Member, t: u64, op: Op) -> SignedEntry {
+        let (n, _) = log.next_position(&m.id, 0);
+        let e = entry(log, m, n, t, op);
+        let signed = e.signed.clone();
+        log.insert(e);
         log.rebuild();
         signed
     }
@@ -386,11 +499,30 @@ mod tests {
         }
     }
 
+    fn create(name: &str) -> Op {
+        Op::Create {
+            name: name.into(),
+            nonce: None,
+        }
+    }
+
+    fn add(m: &Member) -> Op {
+        Op::Add {
+            member: m.id.clone(),
+        }
+    }
+
+    fn remove(m: &Member) -> Op {
+        Op::Remove {
+            member: m.id.clone(),
+        }
+    }
+
     #[test]
     fn signatures_are_checked() {
         let a = member();
         let mut log = Log::new("g");
-        let signed = post(&mut log, &a, 1, Op::Create { name: "G".into() });
+        let signed = post(&mut log, &a, 1, create("G"));
         let mut forged = signed.clone();
         forged.body = forged.body.replace("\"G\"", "\"H\"");
         assert!(parse(forged, "g", true).is_none());
@@ -402,22 +534,8 @@ mod tests {
     fn membership_and_messages() {
         let (a, b, c) = (member(), member(), member());
         let mut log = Log::new("g");
-        post(
-            &mut log,
-            &a,
-            1,
-            Op::Create {
-                name: "Amis".into(),
-            },
-        );
-        post(
-            &mut log,
-            &a,
-            2,
-            Op::Add {
-                member: b.id.clone(),
-            },
-        );
+        post(&mut log, &a, 1, create("Amis"));
+        post(&mut log, &a, 2, add(&b));
         // c is not a member: ignored.
         post(&mut log, &c, 3, msg("intrus"));
         post(&mut log, &b, 4, msg("salut"));
@@ -425,25 +543,23 @@ mod tests {
         assert!(log.view.is_member(&b.id) && !log.view.is_member(&c.id));
         assert_eq!(log.view.messages.len(), 1);
         assert_eq!(log.view.messages[0].text, "salut");
+        log.drop_strangers();
+        assert!(!log.has_entry_of(&c.id));
     }
 
     #[test]
     fn sync_between_logs_converges() {
         let (a, b) = (member(), member());
         let mut la = Log::new("g");
-        post(&mut la, &a, 1, Op::Create { name: "G".into() });
-        post(
-            &mut la,
-            &a,
-            2,
-            Op::Add {
-                member: b.id.clone(),
-            },
-        );
+        post(&mut la, &a, 1, create("G"));
+        post(&mut la, &a, 2, add(&b));
         let mut lb = Log::new("g");
-        for e in la.missing_for(&lb.have()) {
-            lb.insert(parse(e, "g", true).unwrap());
-        }
+        let entries = la
+            .missing_for(&lb.have())
+            .into_iter()
+            .map(|e| parse(e, "g", true).unwrap())
+            .collect();
+        lb.insert_all(entries);
         lb.rebuild();
         post(&mut lb, &b, 3, msg("hello"));
         assert!(lb.is_behind(&la.have()));
@@ -460,72 +576,104 @@ mod tests {
     fn concurrent_removals_resolve_the_same_way() {
         let (a, b, c) = (member(), member(), member());
         let mut log = Log::new("g");
-        post(&mut log, &a, 1, Op::Create { name: "G".into() });
-        post(
-            &mut log,
-            &a,
-            2,
-            Op::Add {
-                member: b.id.clone(),
-            },
-        );
-        post(
-            &mut log,
-            &a,
-            3,
-            Op::Add {
-                member: c.id.clone(),
-            },
-        );
-        // b and c remove each other "at the same time": the earlier one wins.
-        post(
-            &mut log,
-            &c,
-            11,
-            Op::Remove {
-                member: b.id.clone(),
-            },
-        );
-        post(
-            &mut log,
-            &b,
-            10,
-            Op::Remove {
-                member: c.id.clone(),
-            },
-        );
-        assert!(log.view.is_member(&b.id));
+        post(&mut log, &a, 1, create("G"));
+        post(&mut log, &a, 2, add(&b));
+        post(&mut log, &b, 3, add(&c));
+        // a removes b while b removes c: the earlier one wins.
+        post(&mut log, &a, 11, remove(&b));
+        post(&mut log, &b, 10, remove(&c));
+        assert!(!log.view.is_member(&b.id));
         assert!(!log.view.is_member(&c.id));
     }
 
     #[test]
-    fn only_the_author_deletes_a_file() {
+    fn only_the_creator_or_the_adder_removes() {
+        let (a, b, c, d) = (member(), member(), member(), member());
+        let mut log = Log::new("g");
+        post(&mut log, &a, 1, create("G"));
+        post(&mut log, &a, 2, add(&b));
+        post(&mut log, &a, 3, add(&c));
+        post(&mut log, &b, 4, add(&d));
+        post(&mut log, &c, 5, remove(&b));
+        post(&mut log, &c, 6, remove(&a));
+        assert!(log.view.is_member(&a.id) && log.view.is_member(&b.id));
+        post(&mut log, &b, 7, remove(&d));
+        assert!(!log.view.is_member(&d.id));
+        post(&mut log, &c, 8, remove(&c));
+        assert!(!log.view.is_member(&c.id));
+    }
+
+    #[test]
+    fn a_forged_creation_does_not_take_the_group_over() {
+        let (a, m) = (member(), member());
+        let nonce = "abcd".to_string();
+        let gid = group_id(&a.id, &nonce);
+        let mut log = Log::new(&gid);
+        post(
+            &mut log,
+            &a,
+            100,
+            Op::Create {
+                name: "G".into(),
+                nonce: Some(nonce),
+            },
+        );
+        post(&mut log, &a, 101, add(&m));
+        // m's first entry: a creation dated before the real one.
+        post(&mut log, &m, 1, create("Mine"));
+        assert_eq!(log.view.creator, a.id);
+        assert_eq!(log.view.name, "G");
+        assert!(log.view.is_member(&a.id) && log.view.is_member(&m.id));
+    }
+
+    #[test]
+    fn a_pinned_creator_protects_older_groups() {
+        let (a, m) = (member(), member());
+        let mut log = Log::new("g");
+        post(&mut log, &a, 100, create("G"));
+        post(&mut log, &a, 101, add(&m));
+        log.pinned_creator = Some(a.id.clone());
+        post(&mut log, &m, 1, create("Mine"));
+        assert_eq!(log.view.creator, a.id);
+        assert!(log.view.is_member(&a.id));
+    }
+
+    #[test]
+    fn entries_need_order_and_later_timestamps() {
+        let a = member();
+        let mut log = Log::new("g");
+        assert!(!log.insert(entry(&log, &a, 2, 5, msg("gap"))));
+        assert!(log.insert(entry(&log, &a, 1, 5, create("G"))));
+        assert!(!log.insert(entry(&log, &a, 3, 6, msg("gap"))));
+        assert!(!log.insert(entry(&log, &a, 2, 5, msg("same time"))));
+        assert!(!log.insert(entry(&log, &a, 2, 1, msg("backdated"))));
+        assert!(log.insert(entry(&log, &a, 2, 6, msg("ok"))));
+        assert_eq!(log.have().get(&a.id), Some(&2));
+        let huge = Have::from([(a.id.clone(), u64::MAX)]);
+        assert!(log.missing_for(&huge).is_empty());
+    }
+
+    #[test]
+    fn files_are_keyed_by_author() {
         let (a, b) = (member(), member());
         let mut log = Log::new("g");
-        post(&mut log, &a, 1, Op::Create { name: "G".into() });
-        post(
-            &mut log,
-            &a,
-            2,
-            Op::Add {
-                member: b.id.clone(),
-            },
-        );
-        let hash = "ab".repeat(32);
-        post(
-            &mut log,
-            &a,
-            3,
-            Op::FileAdd {
-                id: "f1".into(),
-                name: "x.txt".into(),
-                size: 3,
-                hash,
-            },
-        );
-        post(&mut log, &b, 4, Op::FileDel { id: "f1".into() });
-        assert!(log.view.files.contains_key("f1"));
-        post(&mut log, &a, 5, Op::FileDel { id: "f1".into() });
+        post(&mut log, &a, 1, create("G"));
+        post(&mut log, &a, 2, add(&b));
+        let file = |hash: &str| Op::FileAdd {
+            id: "f1".into(),
+            name: "x.txt".into(),
+            size: 3,
+            hash: hash.repeat(32),
+        };
+        post(&mut log, &a, 3, file("ab"));
+        // b reuses the id: a second file, not a replacement.
+        post(&mut log, &b, 4, file("cd"));
+        assert_eq!(log.view.files.len(), 2);
+        let mine = format!("{}/f1", a.id);
+        assert_eq!(log.view.files[&mine].hash, "ab".repeat(32));
+        post(&mut log, &b, 5, Op::FileDel { id: "f1".into() });
+        assert!(log.view.files.contains_key(&mine));
+        post(&mut log, &a, 6, Op::FileDel { id: "f1".into() });
         assert!(log.view.files.is_empty());
     }
 
@@ -550,16 +698,9 @@ mod tests {
     fn group_size_is_capped() {
         let a = member();
         let mut log = Log::new("g");
-        post(&mut log, &a, 1, Op::Create { name: "G".into() });
+        post(&mut log, &a, 1, create("G"));
         for i in 0..40 {
-            post(
-                &mut log,
-                &a,
-                2 + i,
-                Op::Add {
-                    member: member().id,
-                },
-            );
+            post(&mut log, &a, 2 + i, add(&member()));
         }
         assert_eq!(log.view.members.len(), MAX_MEMBERS);
     }

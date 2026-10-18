@@ -1,8 +1,10 @@
 pub mod group;
+pub mod localsend;
 mod notify;
 pub mod p2p;
 pub mod store;
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -21,6 +23,7 @@ use tauri_plugin_autostart::{MacosLauncher, ManagerExt as _};
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
 
+use localsend::LocalSend;
 use p2p::{
     ChatMessage, CustomRelay, Event, FriendView, GroupDetail, GroupFileView, GroupMessageView,
     GroupsOverview,
@@ -53,10 +56,20 @@ struct Config {
     relay_url: String,
     #[serde(default)]
     relay_token: String,
+    /// Receive files from the LocalSend app on the local network.
+    #[serde(default)]
+    localsend: bool,
 }
 
 fn enabled() -> bool {
     true
+}
+
+/// The setting stays in memory (and is saved again at exit) if writing fails.
+fn log_save(result: std::io::Result<()>) {
+    if let Err(e) = result {
+        eprintln!("config.json not saved: {e}");
+    }
 }
 
 fn default_nickname() -> String {
@@ -71,11 +84,143 @@ fn default_nickname() -> String {
 struct AppState {
     node: Node,
     config: Arc<Mutex<JsonStore<Config>>>,
+    localsend: Mutex<LocalSendSlot>,
+    /// Text messages exchanged with LocalSend devices, by fingerprint.
+    localsend_chats: Mutex<JsonStore<LocalSendChats>>,
+    /// Serializes turning LocalSend on and off.
+    localsend_toggle: tokio::sync::Mutex<()>,
+    data_dir: PathBuf,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LocalSendMessage {
+    id: String,
+    /// Sent by us.
+    mine: bool,
+    text: String,
+    ts: u64,
+    /// Ours: "pending", "delivered" or "failed".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+    /// Theirs, from an older LocalSend that proves nothing about who it is.
+    #[serde(default)]
+    unverified: bool,
+}
+
+#[derive(Default, Serialize, Deserialize)]
+struct LocalSendChat {
+    /// The name the device last gave itself.
+    alias: String,
+    messages: Vec<LocalSendMessage>,
+    #[serde(default)]
+    unread: usize,
+}
+
+type LocalSendChats = HashMap<String, LocalSendChat>;
+
+/// Oldest messages are dropped beyond that, per device.
+const MAX_LOCALSEND_MESSAGES: usize = 1000;
+/// Longest text sent (the UI limits it too).
+const MAX_LOCALSEND_TEXT: usize = 5000;
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LocalSendChatView {
+    fingerprint: String,
+    alias: String,
+    unread: usize,
+    last_text: String,
+    last_ts: u64,
+}
+
+#[derive(Default)]
+struct LocalSendSlot {
+    service: Option<LocalSend>,
+    /// Why it could not start.
+    error: Option<String>,
 }
 
 impl AppState {
     fn config(&self) -> std::sync::MutexGuard<'_, JsonStore<Config>> {
         self.config.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn localsend(&self) -> std::sync::MutexGuard<'_, LocalSendSlot> {
+        self.localsend.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn localsend_chats(&self) -> std::sync::MutexGuard<'_, JsonStore<LocalSendChats>> {
+        self.localsend_chats.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Add or update a message of a device's chat, save, and tell the window.
+    fn put_localsend_message(
+        &self,
+        app: &AppHandle,
+        fingerprint: &str,
+        alias: Option<&str>,
+        message: LocalSendMessage,
+    ) {
+        let alias = {
+            let mut chats = self.localsend_chats();
+            let chat = chats.data.entry(fingerprint.to_string()).or_default();
+            if let Some(alias) = alias {
+                chat.alias = alias.to_string();
+            }
+            match chat.messages.iter_mut().find(|m| m.id == message.id) {
+                Some(known) => *known = message.clone(),
+                None => {
+                    if !message.mine {
+                        chat.unread += 1;
+                    }
+                    chat.messages.push(message.clone());
+                    let excess = chat.messages.len().saturating_sub(MAX_LOCALSEND_MESSAGES);
+                    chat.messages.drain(..excess);
+                }
+            }
+            let alias = chat.alias.clone();
+            log_save(chats.save_now());
+            alias
+        };
+        let _ = app.emit(
+            "localsend-chat",
+            json!({ "fingerprint": fingerprint, "alias": alias, "message": message }),
+        );
+    }
+
+    async fn start_localsend(&self, app: &AppHandle) {
+        let alias = self.config().data.nickname.clone();
+        let (text_app, devices_app) = (app.clone(), app.clone());
+        let hooks = localsend::Hooks {
+            on_text: Arc::new(move |from, text| on_localsend_text(&text_app, from, text)),
+            on_devices: Arc::new(move || {
+                let _ = devices_app.emit("localsend-devices", ());
+            }),
+        };
+        let started =
+            match localsend::Identity::load_or_create(&self.data_dir.join("localsend.json")) {
+                Ok(id) => LocalSend::start(self.node.clone(), &id, &alias, hooks).await,
+                Err(e) => Err(e),
+            };
+        let mut slot = self.localsend();
+        match started {
+            Ok(service) => {
+                *slot = LocalSendSlot {
+                    service: Some(service),
+                    error: None,
+                }
+            }
+            Err(e) => {
+                eprintln!("LocalSend unavailable: {e}");
+                *slot = LocalSendSlot {
+                    service: None,
+                    error: Some(format!("Démarrage impossible : {e}")),
+                };
+            }
+        }
     }
 }
 
@@ -142,7 +287,10 @@ async fn set_relay(
         }
         config.data.relay_url = url;
         config.data.relay_token = token;
-        config.save_now();
+        // Restarting without it saved would silently drop the setting.
+        config
+            .save_now()
+            .map_err(|e| format!("Enregistrement du réglage impossible : {e}"))?;
     }
     std::env::set_var(SHOW_AFTER_RESTART, "1");
     app.restart();
@@ -170,7 +318,7 @@ async fn select_download_dir(
     let path = dir.to_string_lossy().into_owned();
     let mut config = state.config();
     config.data.download_path = path.clone();
-    config.save_now();
+    log_save(config.save_now());
     Ok(Some(path))
 }
 
@@ -178,7 +326,7 @@ async fn select_download_dir(
 fn set_auto_launch(app: AppHandle, state: State<AppState>, enable: bool) -> bool {
     let mut config = state.config();
     config.data.auto_launch = enable;
-    config.save_now();
+    log_save(config.save_now());
     apply_auto_launch(&app, enable);
     enable
 }
@@ -249,10 +397,229 @@ fn set_nickname(state: State<AppState>, nickname: String) -> String {
     let nickname: String = nickname.trim().chars().take(group::MAX_NICK).collect();
     let mut config = state.config();
     config.data.nickname = nickname.clone();
-    config.save_now();
+    log_save(config.save_now());
     drop(config);
     state.node.set_nickname(&nickname);
+    if let Some(service) = &state.localsend().service {
+        service.set_alias(&nickname);
+    }
     nickname
+}
+
+// ─── LocalSend ───────────────────────────────────────────────────────────────
+
+#[tauri::command]
+fn get_localsend_status(state: State<AppState>) -> Value {
+    localsend_status(&state)
+}
+
+fn localsend_status(state: &AppState) -> Value {
+    let slot = state.localsend();
+    match (&slot.service, &slot.error) {
+        (Some(service), _) => json!({ "running": true, "status": service.status() }),
+        (None, Some(error)) => json!({ "running": false, "error": error }),
+        (None, None) => json!({ "running": false }),
+    }
+}
+
+#[tauri::command]
+fn get_localsend_devices(state: State<AppState>) -> Vec<localsend::DeviceView> {
+    state
+        .localsend()
+        .service
+        .as_ref()
+        .map(LocalSend::devices)
+        .unwrap_or_default()
+}
+
+/// Look for devices again; the list comes back through `localsend-devices`.
+#[tauri::command]
+fn scan_localsend(state: State<AppState>) {
+    if let Some(service) = &state.localsend().service {
+        service.scan();
+    }
+}
+
+#[tauri::command]
+async fn send_localsend_files(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    fingerprint: String,
+) -> Result<usize, String> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let mut dialog = app
+        .dialog()
+        .file()
+        .set_title("Sélectionner les fichiers à envoyer");
+    if let Some(w) = app.get_webview_window("main") {
+        dialog = dialog.set_parent(&w);
+    }
+    dialog.pick_files(move |files| {
+        let _ = tx.send(files);
+    });
+    let files = rx.await.ok().flatten().unwrap_or_default();
+    let paths: Vec<PathBuf> = files
+        .into_iter()
+        .filter_map(|f| f.into_path().ok())
+        .collect();
+    if paths.is_empty() {
+        return Ok(0);
+    }
+    match &state.localsend().service {
+        Some(service) => service.send_files(&fingerprint, &paths).map_err(String::from),
+        None => Err("LocalSend est désactivé".into()),
+    }
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64)
+}
+
+/// The devices we have exchanged text with, latest first.
+#[tauri::command]
+fn get_localsend_chats(state: State<AppState>) -> Vec<LocalSendChatView> {
+    let chats = state.localsend_chats();
+    let mut list: Vec<LocalSendChatView> = chats
+        .data
+        .iter()
+        .filter_map(|(fingerprint, chat)| {
+            let last = chat.messages.last()?;
+            Some(LocalSendChatView {
+                fingerprint: fingerprint.clone(),
+                alias: chat.alias.clone(),
+                unread: chat.unread,
+                last_text: last.text.chars().take(100).collect(),
+                last_ts: last.ts,
+            })
+        })
+        .collect();
+    list.sort_by_key(|c| std::cmp::Reverse(c.last_ts));
+    list
+}
+
+#[tauri::command]
+fn get_localsend_chat(state: State<AppState>, fingerprint: String) -> Value {
+    let chats = state.localsend_chats();
+    match chats.data.get(&fingerprint) {
+        Some(chat) => json!({ "alias": chat.alias, "messages": chat.messages }),
+        None => json!({ "alias": "", "messages": [] }),
+    }
+}
+
+#[tauri::command]
+fn mark_localsend_read(state: State<AppState>, fingerprint: String) {
+    let mut chats = state.localsend_chats();
+    if let Some(chat) = chats.data.get_mut(&fingerprint).filter(|c| c.unread > 0) {
+        chat.unread = 0;
+        log_save(chats.save_now());
+    }
+}
+
+/// Send text to a device's chat; it shows as pending until the device has it.
+#[tauri::command]
+fn send_localsend_text(
+    app: AppHandle,
+    state: State<AppState>,
+    fingerprint: String,
+    text: String,
+) -> Result<LocalSendMessage, String> {
+    let text = text.trim().to_string();
+    if text.is_empty() {
+        return Err("Message vide".into());
+    }
+    if text.chars().count() > MAX_LOCALSEND_TEXT {
+        return Err(format!("Message trop long ({MAX_LOCALSEND_TEXT} caractères max)"));
+    }
+    let message = LocalSendMessage {
+        id: uuid::Uuid::new_v4().to_string(),
+        mine: true,
+        text: text.clone(),
+        ts: now_ms(),
+        status: Some("pending".into()),
+        error: None,
+        unverified: false,
+    };
+    let alias = state
+        .localsend()
+        .service
+        .as_ref()
+        .and_then(|s| s.devices().into_iter().find(|d| d.fingerprint == fingerprint))
+        .map(|d| d.alias);
+    // Shown before it leaves: the answer may come back right away.
+    state.put_localsend_message(&app, &fingerprint, alias.as_deref(), message.clone());
+    let (handle, fp, sent) = (app.clone(), fingerprint.clone(), message.clone());
+    let started = match &state.localsend().service {
+        Some(service) => service.send_text(&fingerprint, text, move |result| {
+            let Some(state) = handle.try_state::<AppState>() else {
+                return;
+            };
+            let mut message = sent;
+            match result {
+                Ok(()) => message.status = Some("delivered".into()),
+                Err(e) => {
+                    message.status = Some("failed".into());
+                    message.error = Some(e);
+                }
+            }
+            state.put_localsend_message(&handle, &fp, None, message);
+        }),
+        None => Err("LocalSend est désactivé"),
+    };
+    let mut message = message;
+    if let Err(e) = started {
+        message.status = Some("failed".into());
+        message.error = Some(e.into());
+        state.put_localsend_message(&app, &fingerprint, None, message.clone());
+    }
+    Ok(message)
+}
+
+fn on_localsend_text(app: &AppHandle, from: localsend::TextSender, text: String) {
+    let Some(state) = app.try_state::<AppState>() else {
+        return;
+    };
+    let message = LocalSendMessage {
+        id: uuid::Uuid::new_v4().to_string(),
+        mine: false,
+        text: text.clone(),
+        ts: now_ms(),
+        status: None,
+        error: None,
+        unverified: !from.verified,
+    };
+    state.put_localsend_message(app, &from.fingerprint, Some(&from.alias), message);
+    if !window_focused(app) {
+        let handle = app.clone();
+        notify::notify(
+            app,
+            &format!("{} (LocalSend)", from.alias),
+            &text,
+            move || open_chat(&handle, "localsend", from.fingerprint),
+        );
+    }
+}
+
+#[tauri::command]
+async fn set_localsend(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    enable: bool,
+) -> Result<Value, ()> {
+    let _toggle = state.localsend_toggle.lock().await;
+    {
+        let mut config = state.config();
+        config.data.localsend = enable;
+        log_save(config.save_now());
+    }
+    // Stop first, so a restart can take the port back.
+    let old = std::mem::take(&mut *state.localsend());
+    drop(old);
+    if enable {
+        state.start_localsend(&app).await;
+    }
+    Ok(localsend_status(&state))
 }
 
 // ─── Groups ──────────────────────────────────────────────────────────────────
@@ -439,7 +806,7 @@ fn toggle_window(app: &AppHandle) {
     }
 }
 
-/// Open a chat ("friend" or "group") from outside the UI (notification
+/// Open a chat ("friend", "group" or "localsend") from outside the UI (notification
 /// click). A freshly created window has not loaded yet, so it picks the chat
 /// up once mounted.
 fn open_chat(app: &AppHandle, kind: &'static str, id: String) {
@@ -563,6 +930,15 @@ fn friend_name(app: &AppHandle, id: &str) -> String {
         .unwrap_or_else(|| "Inconnu".into())
 }
 
+/// A friend's name, or the name a LocalSend device gives itself, marked as
+/// such: anyone on the network can call their device "Alice".
+fn sender_name(app: &AppHandle, t: &TransferView) -> String {
+    match &t.peer_name {
+        Some(name) => format!("{name} (LocalSend)"),
+        None => friend_name(app, &t.friend_id),
+    }
+}
+
 fn on_p2p_event(app: &AppHandle, event: Event) {
     match event {
         Event::FriendStatus { friend_id, online } => {
@@ -595,16 +971,29 @@ fn on_p2p_event(app: &AppHandle, event: Event) {
                 );
             }
         }
-        Event::FileOffer(t) => {
+        Event::FileOffer(t, count) => {
             let handle = app.clone();
+            let from = sender_name(app, &t);
+            let (title, what) = if count > 1 {
+                (
+                    format!("{from} vous envoie {count} fichiers"),
+                    format!("dont \"{}\"", t.file_name),
+                )
+            } else {
+                (
+                    format!("{from} vous envoie un fichier"),
+                    format!("\"{}\" ({})", t.file_name, format_size(t.file_size)),
+                )
+            };
+            let warning = if t.executable {
+                " Attention : ce fichier peut exécuter du code."
+            } else {
+                ""
+            };
             notify::notify(
                 app,
-                &format!("{} vous envoie un fichier", friend_name(app, &t.friend_id)),
-                &format!(
-                    "\"{}\" ({}) — Cliquez pour accepter ou refuser.",
-                    t.file_name,
-                    format_size(t.file_size)
-                ),
+                &title,
+                &format!("{what} — Cliquez pour accepter ou refuser.{warning}"),
                 move || {
                     show_window(&handle);
                 },
@@ -612,9 +1001,10 @@ fn on_p2p_event(app: &AppHandle, event: Event) {
         }
         Event::TransferComplete(t) => {
             let handle = app.clone();
+            let from = sender_name(app, &t);
             notify::notify(
                 app,
-                &format!("Fichier reçu de {}", friend_name(app, &t.friend_id)),
+                &format!("Fichier reçu de {from}"),
                 &format!("\"{}\" a été enregistré.", t.file_name),
                 move || {
                     if let Some(path) = t.saved_path {
@@ -691,32 +1081,51 @@ fn migrate_from_electron(app: &AppHandle, dir: &Path) {
         "messages.json",
         "config.json",
     ] {
-        let _ = std::fs::copy(old.join(file), dir.join(file));
+        // Rewritten rather than copied, so they get our permissions.
+        if let Ok(bytes) = std::fs::read(old.join(file)) {
+            let _ = store::write_atomic(&dir.join(file), &bytes);
+        }
     }
 }
 
 /// The identity is a persistent Ed25519 seed: its public key is the ID we
-/// share, and connections are authenticated against it.
-fn load_identity(path: &Path) -> SecretKey {
-    let stored = std::fs::read_to_string(path)
-        .ok()
-        .and_then(|s| hex::decode(s.trim()).ok());
-    if let Some(seed) = stored.and_then(|b| <[u8; 32]>::try_from(b).ok()) {
-        return SecretKey::from_bytes(&seed);
+/// share, and connections are authenticated against it. A new one is made
+/// only when there is none: losing it would lose every friend.
+fn load_identity(path: &Path) -> std::io::Result<SecretKey> {
+    use std::io::{Error, ErrorKind};
+    match std::fs::read_to_string(path) {
+        Ok(text) => {
+            let seed = hex::decode(text.trim())
+                .ok()
+                .and_then(|b| <[u8; 32]>::try_from(b).ok());
+            match seed {
+                Some(seed) => return Ok(SecretKey::from_bytes(&seed)),
+                None => {
+                    // Kept aside: it might still be recovered by hand.
+                    let aside = path.with_extension(format!("bad-{}", rand::random::<u32>()));
+                    std::fs::rename(path, &aside)?;
+                    eprintln!("identity.key unreadable, moved to {}", aside.display());
+                }
+            }
+        }
+        Err(e) if e.kind() == ErrorKind::NotFound => {}
+        // Locked by another program, permissions…: try again later rather
+        // than replace it.
+        Err(e) => {
+            return Err(Error::new(
+                e.kind(),
+                format!("lecture de {} impossible : {e}", path.display()),
+            ))
+        }
     }
     let seed: [u8; 32] = rand::random();
-    let _ = std::fs::write(path, hex::encode(seed));
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
-    }
-    SecretKey::from_bytes(&seed)
+    store::write_atomic(path, hex::encode(seed).as_bytes())?;
+    Ok(SecretKey::from_bytes(&seed))
 }
 
 fn setup(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     let dir = data_dir(app);
-    std::fs::create_dir_all(&dir)?;
+    store::create_private_dir(&dir)?;
     migrate_from_electron(app, &dir);
 
     let default_downloads = app
@@ -731,13 +1140,15 @@ fn setup(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
             nickname: default_nickname(),
             relay_url: String::new(),
             relay_token: String::new(),
+            localsend: false,
         },
     );
     if config.data.download_path.is_empty() {
         config.data.download_path = default_downloads.to_string_lossy().into_owned();
-        config.save_now();
+        log_save(config.save_now());
     }
     let auto_launch = config.data.auto_launch;
+    let localsend = config.data.localsend;
     let nickname = config.data.nickname.clone();
     let relay = if config.data.relay_url.is_empty() {
         None
@@ -758,7 +1169,7 @@ fn setup(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     let handle = app.clone();
     let cfg = config.clone();
     let node = tauri::async_runtime::block_on(Node::start(p2p::Options {
-        secret: load_identity(&dir.join("identity.key")),
+        secret: load_identity(&dir.join("identity.key"))?,
         friends,
         messages,
         download_dir: Arc::new(move || {
@@ -776,9 +1187,36 @@ fn setup(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
         groups_dir: dir.join("groups"),
         nickname,
         relay,
+        // A certificate of its own, not LocalSend's: not linked to what this
+        // computer announces to every LocalSend device.
+        lan: localsend::Identity::load_or_create(&dir.join("lan.json"))
+            .inspect_err(|e| eprintln!("local network fast path off: {e}"))
+            .ok(),
     }))?;
 
-    app.manage(AppState { node, config });
+    app.manage(AppState {
+        node,
+        config,
+        localsend: Mutex::new(LocalSendSlot::default()),
+        localsend_chats: Mutex::new(JsonStore::load(
+            dir.join("localsend-chats.json"),
+            LocalSendChats::new(),
+        )),
+        localsend_toggle: tokio::sync::Mutex::new(()),
+        data_dir: dir,
+    });
+    if localsend {
+        // In the background: the port may take a moment to give up on.
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            let state = app.state::<AppState>();
+            let _toggle = state.localsend_toggle.lock().await;
+            // Unless it was turned off in the meantime.
+            if state.config().data.localsend {
+                state.start_localsend(&app).await;
+            }
+        });
+    }
 
     apply_auto_launch(app, auto_launch);
     create_tray(app)?;
@@ -828,6 +1266,15 @@ pub fn run() {
             set_nickname,
             get_relay_status,
             set_relay,
+            get_localsend_status,
+            set_localsend,
+            get_localsend_chats,
+            get_localsend_chat,
+            mark_localsend_read,
+            send_localsend_text,
+            get_localsend_devices,
+            scan_localsend,
+            send_localsend_files,
             get_groups,
             create_group,
             respond_to_group_invite,
@@ -862,7 +1309,7 @@ pub fn run() {
         }
         RunEvent::Exit => {
             if let Some(state) = app.try_state::<AppState>() {
-                state.config().save_now();
+                log_save(state.config().save_now());
                 let node = state.node.clone();
                 tauri::async_runtime::block_on(async move {
                     let _ = tokio::time::timeout(Duration::from_secs(2), node.shutdown()).await;

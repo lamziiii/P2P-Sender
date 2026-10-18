@@ -4,6 +4,9 @@ import type { ChatMessage, Config, Friend, GroupsOverview, OpenChat, Transfer } 
 import { formatBytes } from './format';
 import { GroupsTab, GroupView } from './Groups';
 import { Icon } from './icons';
+import { LocalSendChatView } from './LocalSendChat';
+import { LocalSendDevices } from './LocalSendDevices';
+import { LocalSendSettings } from './LocalSendSettings';
 import { RelaySettings } from './RelaySettings';
 
 const ACTIVE = new Set(['sending', 'receiving']);
@@ -62,18 +65,27 @@ function App() {
   const [overview, setOverview] = useState<GroupsOverview>({ groups: [], invites: [] });
   const [groupId, setGroupId] = useState<string | null>(null);
   const [nickname, setNickname] = useState('');
+  const [lsChat, setLsChat] = useState<string | null>(null);
   const [theme, setTheme] = useState<'light' | 'dark'>(
     () => (localStorage.getItem('theme') as 'light' | 'dark') ?? 'dark'
   );
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const chatFriendIdRef = useRef<string | null>(null);
+  const chatErrorTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const sendingRef = useRef(false);
 
   const chatFriend = friends.find(f => f.id === chatFriendId) ?? null;
   const offers = transfers.filter(t => t.dir === 'in' && t.status === 'pending');
+  // Several files from one sender are answered together.
+  const offerGroups = Object.values(offers.reduce<Record<string, Transfer[]>>((groups, t) => {
+    (groups[t.friendId] ??= []).push(t);
+    return groups;
+  }, {}));
   const transferList = transfers.filter(t => t.status !== 'pending');
   const groupBadge = overview.invites.length + overview.groups.reduce((n, g) => n + g.unread, 0);
   const runningCount = transferList.filter(t => !FINAL.has(t.status)).length;
   const friendName = (id: string) => friends.find(f => f.id === id)?.name;
+  const senderName = (t: Transfer) => friendName(t.friendId) ?? t.peerName;
 
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme === 'dark' ? 'dark' : '');
@@ -83,8 +95,16 @@ function App() {
   const openChatWith = async (friendId: string) => {
     chatFriendIdRef.current = friendId;
     setChatFriendId(friendId);
-    setChatMessages(await api.getMessages(friendId));
+    setChatMessages([]);
     setActiveTab('chat');
+    const history = await api.getMessages(friendId);
+    // Another chat may have been opened meanwhile.
+    if (chatFriendIdRef.current !== friendId) return;
+    // Keep what arrived while loading.
+    setChatMessages(prev => {
+      const known = new Set(history.map(m => m.id));
+      return [...history, ...prev.filter(m => !known.has(m.id))];
+    });
   };
 
   const openGroup = (gid: string) => {
@@ -93,8 +113,15 @@ function App() {
     setActiveTab('group');
   };
 
+  const openLocalSendChat = (fingerprint: string) => {
+    chatFriendIdRef.current = null;
+    setLsChat(fingerprint);
+    setActiveTab('localsend');
+  };
+
   const openFromOutside = (target: OpenChat | null) => {
     if (target?.kind === 'group') openGroup(target.id);
+    else if (target?.kind === 'localsend') openLocalSendChat(target.id);
     else if (target) openChatWith(target.id);
   };
 
@@ -119,7 +146,6 @@ function App() {
           return next;
         });
       }),
-      api.onSwitchTab(tab => setActiveTab(tab)),
       api.onNewMessage(({ friendId, message }) => {
         if (chatFriendIdRef.current === friendId) setChatMessages(prev => [...prev, message]);
       }),
@@ -135,7 +161,10 @@ function App() {
       }),
     ];
     api.takeOpenChat().then(openFromOutside);
-    return () => unsubscribers.forEach(unsubscribe => unsubscribe());
+    return () => {
+      unsubscribers.forEach(unsubscribe => unsubscribe());
+      clearTimeout(chatErrorTimer.current);
+    };
     // Subscribed once: the handlers only use state setters and refs.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -146,19 +175,28 @@ function App() {
 
   const showChatError = (text: string) => {
     setChatError(text);
-    setTimeout(() => setChatError(''), 3000);
+    clearTimeout(chatErrorTimer.current);
+    chatErrorTimer.current = setTimeout(() => setChatError(''), 3000);
   };
 
   const sendChatMessage = async () => {
     const text = chatInput.trim();
-    if (!text || !chatFriendId) return;
-    const entry = await api.sendMessage(chatFriendId, text);
-    if ('error' in entry) {
-      showChatError(entry.error === 'too_long' ? 'Message trop long (5000 caractères max).' : 'Message non envoyé.');
-      return;
-    }
-    setChatMessages(prev => [...prev, entry]);
+    const friendId = chatFriendId;
+    // Enter pressed twice before the first send returns: send once.
+    if (!text || !friendId || sendingRef.current) return;
+    sendingRef.current = true;
     setChatInput('');
+    try {
+      const entry = await api.sendMessage(friendId, text);
+      if ('error' in entry) {
+        setChatInput(text);
+        showChatError(entry.error === 'too_long' ? 'Message trop long (5000 caractères max).' : 'Message non envoyé.');
+        return;
+      }
+      if (chatFriendIdRef.current === friendId) setChatMessages(prev => [...prev, entry]);
+    } finally {
+      sendingRef.current = false;
+    }
   };
 
   const addFriend = async () => {
@@ -192,9 +230,48 @@ function App() {
   const onlineCount = friends.filter(f => f.online).length;
   const onlineLabel = onlineCount === 0 ? 'Aucun ami en ligne' : `${onlineCount} ami${onlineCount > 1 ? 's' : ''} en ligne`;
 
+  // Shown in every view: an offer must not wait unseen behind a chat.
+  const offerBanners = offerGroups.map(group => {
+    const [first] = group;
+    const respond = (accept: boolean) => {
+      group.forEach(t => api.respondToFileOffer(t.id, accept));
+      if (accept) setActiveTab('transfers');
+    };
+    const risky = group.some(t => t.executable);
+    return (
+      <div key={first.id} className="offer-banner">
+        <div className="file-icon"><Icon name="file" size={18} /></div>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div className="offer-title">{group.length > 1 ? `${group.length} fichiers entrants` : 'Fichier entrant'}</div>
+          <div className="offer-desc">
+            <strong>{senderName(first) ?? 'Un ami'}</strong>{first.peerName ? ' (LocalSend, identité non vérifiée)' : ''} vous envoie{' '}
+            {group.length > 1
+              ? <>{group.slice(0, 3).map(t => `"${t.fileName}"`).join(', ')}{group.length > 3 ? ` et ${group.length - 3} autres` : ''}</>
+              : <strong>"{first.fileName}"</strong>}{' '}
+            ({formatBytes(group.reduce((n, t) => n + t.fileSize, 0))})
+          </div>
+          {risky && (
+            <div className="error-text" style={{ marginBottom: 8 }}>
+              Attention : {group.length > 1 ? 'certains fichiers peuvent' : 'ce fichier peut'} exécuter du code. Ne l’ouvrez que si vous attendiez cet envoi.
+            </div>
+          )}
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button className="btn" style={{ flex: 1 }} onClick={() => respond(true)}>{group.length > 1 ? 'Tout accepter' : 'Accepter'}</button>
+            <button className="btn btn-secondary" style={{ flex: 1 }} onClick={() => respond(false)}>{group.length > 1 ? 'Tout refuser' : 'Refuser'}</button>
+          </div>
+        </div>
+      </div>
+    );
+  });
+
   /* ─── Group View ─── */
   if (activeTab === 'group' && groupId) {
-    return <GroupView key={groupId} gid={groupId} friends={friends} transfers={transfers} onBack={() => setActiveTab('groups')} />;
+    return <GroupView key={groupId} gid={groupId} friends={friends} transfers={transfers} notice={offerBanners} onBack={() => setActiveTab('groups')} />;
+  }
+
+  /* ─── LocalSend Chat View ─── */
+  if (activeTab === 'localsend' && lsChat) {
+    return <LocalSendChatView key={lsChat} fingerprint={lsChat} notice={offerBanners} onBack={() => setActiveTab('friends')} />;
   }
 
   /* ─── Chat View ─── */
@@ -214,6 +291,8 @@ function App() {
           </div>
           <button className="icon-btn" title="Masquer" onClick={() => api.hideWindow()}><Icon name="close" /></button>
         </div>
+
+        {offerBanners.length > 0 && <div className="content" style={{ flex: 'none' }}>{offerBanners}</div>}
 
         <div className="chat-messages">
           {chatMessages.length === 0 && (
@@ -296,23 +375,7 @@ function App() {
       <div className="content">
 
         {/* ── File Offer Banners ── */}
-        {offers.map(offer => (
-          <div key={offer.id} className="offer-banner">
-            <div className="file-icon"><Icon name="file" size={18} /></div>
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <div className="offer-title">Fichier entrant</div>
-              <div className="offer-desc">
-                <strong>{friendName(offer.friendId) ?? 'Un ami'}</strong> vous envoie{' '}
-                <strong>"{offer.fileName}"</strong>{' '}
-                ({formatBytes(offer.fileSize)})
-              </div>
-              <div style={{ display: 'flex', gap: 8 }}>
-                <button className="btn" style={{ flex: 1 }} onClick={() => { api.respondToFileOffer(offer.id, true); setActiveTab('transfers'); }}>Accepter</button>
-                <button className="btn btn-secondary" style={{ flex: 1 }} onClick={() => api.respondToFileOffer(offer.id, false)}>Refuser</button>
-              </div>
-            </div>
-          </div>
-        ))}
+        {offerBanners}
 
         {/* ── Friends Tab ── */}
         {activeTab === 'friends' && (
@@ -360,6 +423,8 @@ function App() {
                 Aucun ami. Ajoutez quelqu'un ci-dessous.
               </div>
             )}
+
+            {config.localsend && <LocalSendDevices onSent={() => setActiveTab('transfers')} onOpenChat={openLocalSendChat} />}
 
             {/* Add Friend */}
             <div className="section-header" style={{ marginTop: 6 }}>Ajouter un ami</div>
@@ -410,13 +475,13 @@ function App() {
                         <span className="transfer-dir">
                           <Icon name={t.dir === 'out' ? 'up' : 'down'} size={12} />
                           {t.dir === 'out' ? 'Envoi' : 'Réception'}
-                          {friendName(t.friendId) ? ` · ${friendName(t.friendId)}` : ''}
+                          {senderName(t) ? ` · ${senderName(t)}${t.peerName ? ' (LocalSend)' : ''}` : ''}
                           {' · '}
                           {ACTIVE.has(t.status) || t.status === 'paused' ? `${formatBytes(t.bytes)} / ` : ''}{formatBytes(t.fileSize)}
                         </span>
                         {ACTIVE.has(t.status) && t.speed > 0 && (
                           <span style={{ whiteSpace: 'nowrap' }}>
-                            {formatSpeed(t.speed)} · {formatEta(t)}
+                            {t.lan ? 'Réseau local · ' : ''}{formatSpeed(t.speed)} · {formatEta(t)}
                           </span>
                         )}
                       </div>
@@ -454,7 +519,7 @@ function App() {
                 <button className="btn btn-secondary btn-small" style={{ height: 34 }} disabled={!nickname.trim() || nickname.trim() === config.nickname} onClick={async () => {
                   const saved = await api.setNickname(nickname);
                   setNickname(saved);
-                  setConfig({ ...config, nickname: saved });
+                  setConfig(c => ({ ...c, nickname: saved }));
                 }}>Enregistrer</button>
               </div>
               <div className="setting-sub" style={{ marginTop: 6 }}>Vu par les membres de vos groupes qui ne sont pas vos amis.</div>
@@ -466,10 +531,16 @@ function App() {
                 <div className="path-box" title={config.downloadPath}>{config.downloadPath || 'Dossier système'}</div>
                 <button className="btn btn-secondary btn-small" onClick={async () => {
                   const p = await api.selectDownloadDir();
-                  if (p) setConfig({ ...config, downloadPath: p });
+                  if (p) setConfig(c => ({ ...c, downloadPath: p }));
                 }}>Changer</button>
               </div>
             </div>
+
+            <LocalSendSettings
+              enabled={config.localsend ?? false}
+              nickname={config.nickname}
+              onChange={localsend => setConfig(c => ({ ...c, localsend }))}
+            />
 
             <RelaySettings config={config} />
 
@@ -485,7 +556,7 @@ function App() {
                     checked={config.autoLaunch ?? true}
                     onChange={async (e) => {
                       const val = await api.setAutoLaunch(e.target.checked);
-                      setConfig({ ...config, autoLaunch: val });
+                      setConfig(c => ({ ...c, autoLaunch: val }));
                     }}
                   />
                   <span className="toggle-track" />

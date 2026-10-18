@@ -43,6 +43,18 @@ const PATHS: Record<string, ReactNode> = {
   plus: <path d="M5 12h14M12 5v14" />,
   up: <path d="m5 12 7-7 7 7M12 19V5" />,
   down: <path d="M12 5v14m7-7-7 7-7-7" />,
+  phone: (
+    <>
+      <rect x="6" y="2" width="12" height="20" rx="2" />
+      <path d="M11 18h2" />
+    </>
+  ),
+  monitor: (
+    <>
+      <rect x="2" y="3" width="20" height="14" rx="2" />
+      <path d="M8 21h8M12 17v4" />
+    </>
+  ),
   sync: <path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8M3 3v5h5M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16M16 16h5v5" />,
 };
 

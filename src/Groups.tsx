@@ -145,10 +145,12 @@ export function GroupsTab({ overview, friends, onOpen }: {
 
 type Pane = 'chat' | 'files' | 'settings';
 
-export function GroupView({ gid, friends, transfers, onBack }: {
+export function GroupView({ gid, friends, transfers, notice, onBack }: {
   gid: string;
   friends: Friend[];
   transfers: Transfer[];
+  // Shown above the group (incoming file offers).
+  notice?: React.ReactNode[];
   onBack: () => void;
 }) {
   const [pane, setPane] = useState<Pane>('chat');
@@ -160,9 +162,17 @@ export function GroupView({ gid, friends, transfers, onBack }: {
   const [adding, setAdding] = useState(false);
   const endRef = useRef<HTMLDivElement>(null);
   const paneRef = useRef<Pane>('chat');
+  const refreshId = useRef(0);
+  const sendingRef = useRef(false);
+  const flashTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+
+  useEffect(() => () => clearTimeout(flashTimer.current), []);
 
   const refresh = useCallback(async () => {
+    // Updates come in bursts: only the latest answer is applied.
+    const id = ++refreshId.current;
     const [d, m, f] = await Promise.all([api.getGroup(gid), api.getGroupMessages(gid), api.getGroupFiles(gid)]);
+    if (id !== refreshId.current) return;
     setDetail(d);
     setMessages(m);
     setFiles(f);
@@ -171,7 +181,6 @@ export function GroupView({ gid, friends, transfers, onBack }: {
 
   useEffect(() => {
     // Initial load, then refresh on every change of this group.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     refresh();
     const unsubscribers = [
       api.onGroupUpdate(({ gid: changed }) => { if (changed === gid) refresh(); }),
@@ -191,15 +200,25 @@ export function GroupView({ gid, friends, transfers, onBack }: {
 
   const flash = (text: string) => {
     setError(text);
-    setTimeout(() => setError(''), 3000);
+    clearTimeout(flashTimer.current);
+    flashTimer.current = setTimeout(() => setError(''), 3000);
   };
 
   const send = async () => {
     const text = input.trim();
-    if (!text) return;
-    const res = await api.sendGroupMessage(gid, text);
-    if ('error' in res) return flash(GROUP_ERRORS[res.error] ?? 'Message non envoyé.');
+    // Enter pressed twice before the first send returns: send once.
+    if (!text || sendingRef.current) return;
+    sendingRef.current = true;
     setInput('');
+    try {
+      const res = await api.sendGroupMessage(gid, text);
+      if ('error' in res) {
+        setInput(text);
+        flash(GROUP_ERRORS[res.error] ?? 'Message non envoyé.');
+      }
+    } finally {
+      sendingRef.current = false;
+    }
   };
 
   const addFiles = async () => {
@@ -249,6 +268,8 @@ export function GroupView({ gid, friends, transfers, onBack }: {
           </button>
         </div>
       )}
+
+      {notice && notice.length > 0 && <div className="content" style={{ flex: 'none' }}>{notice}</div>}
 
       {detail?.removed && (
         <div className="group-banner danger">
@@ -424,7 +445,7 @@ function GroupSettings({ detail, friends, onDone, onLeft }: {
                 {m.me ? 'Vous' : m.online ? 'En ligne' : 'Hors ligne'}{!m.me && m.friend && ' · ami'}
               </div>
             </div>
-            {active && !m.me && (
+            {active && m.removable && (
               <button className="btn btn-secondary btn-small" onClick={() => api.removeGroupMember(gid, m.id)}>Retirer</button>
             )}
           </div>

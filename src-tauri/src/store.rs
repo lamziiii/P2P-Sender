@@ -42,19 +42,42 @@ impl<T: Serialize + DeserializeOwned> JsonStore<T> {
             .map(|json| (self.path.clone(), json))
     }
 
-    pub fn save_now(&mut self) {
-        self.dirty = false;
-        if let Ok(json) = serde_json::to_vec(&self.data) {
-            let _ = write_atomic(&self.path, &json);
-        }
+    /// Write now; on failure the store stays dirty, so a later save retries.
+    pub fn save_now(&mut self) -> io::Result<()> {
+        let json = serde_json::to_vec(&self.data).map_err(io::Error::other)?;
+        let result = write_atomic(&self.path, &json);
+        self.dirty = result.is_err();
+        result
     }
 }
 
 /// Write to a temporary file then rename it, so a crash never leaves a
-/// truncated file behind.
+/// truncated file behind. On Unix only the user can read it (keys, chats).
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    use std::io::Write;
     let mut tmp = path.as_os_str().to_owned();
     tmp.push(".tmp");
-    fs::write(&tmp, bytes)?;
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&tmp)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    drop(file);
     fs::rename(&tmp, path)
+}
+
+/// Create a folder only the user can open (on Unix).
+pub fn create_private_dir(path: &Path) -> io::Result<()> {
+    fs::create_dir_all(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
 }

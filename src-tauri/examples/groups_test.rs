@@ -46,6 +46,7 @@ impl Peer {
             groups_dir: self.dir.join("groups"),
             nickname: self.name.to_string(),
             relay: relay(),
+            lan: None,
         })
         .await
         .expect("bind")
@@ -136,7 +137,8 @@ async fn main() {
     .await;
     wait("les pseudos sont partagés", || {
         b.group_detail(&gid)
-            .is_some_and(|d| d.members.iter().any(|m| m.name == "carol"))
+            // Not B's friend: her nickname comes with the start of her id.
+            .is_some_and(|d| d.members.iter().any(|m| m.name.starts_with("carol (")))
     })
     .await;
 
@@ -205,15 +207,24 @@ async fn main() {
     println!("  ok  contenu identique");
 
     println!("5. Retrait d'un membre");
-    b.group_remove_member(&gid, &pc.id());
+    // Only the creator (A) or whoever added C (A too) may remove her.
+    assert!(b
+        .group_detail(&gid)
+        .is_some_and(|d| d.members.iter().all(|m| !m.removable)));
+    let a = pa.start().await;
+    // The removed member learns it from the remover, connected to her.
+    wait("A reconnectée à C", || {
+        a.friends().iter().any(|f| f.id == pc.id() && f.online)
+    })
+    .await;
+    a.group_remove_member(&gid, &pc.id());
     wait("C apprend qu'elle a été retirée", || {
         c.group_detail(&gid).is_some_and(|d| d.removed)
     })
     .await;
     assert!(c.group_send(&gid, "je suis encore là ?").is_err());
-    let a = pa.start().await;
-    wait("A voit le retrait (synchro via B)", || {
-        a.group_detail(&gid).is_some_and(|d| d.members.len() == 2)
+    wait("B voit le retrait", || {
+        b.group_detail(&gid).is_some_and(|d| d.members.len() == 2)
     })
     .await;
     b.group_send(&gid, "entre nous").unwrap();
