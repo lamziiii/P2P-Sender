@@ -1,0 +1,70 @@
+name: Winget
+
+# Sends a released version to winget: a pull request to microsoft/winget-pkgs,
+# merged after Microsoft's checks. Called by build.yml after each release, or
+# run by hand from the Actions tab for a given tag.
+#
+# The first version had no manifest to update: it was submitted from the
+# manifests in winget/<version>/. Later versions update the latest one.
+#
+# Needs a WINGET_TOKEN secret: a classic GitHub token with the public_repo
+# scope (wingetcreate opens the pull request from a fork in that account).
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (v1.2.3)'
+        required: true
+  workflow_call:
+    inputs:
+      tag:
+        type: string
+        required: true
+    secrets:
+      WINGET_TOKEN:
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  submit:
+    runs-on: windows-latest
+    steps:
+      - name: Check out git repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Submit to winget
+        shell: pwsh
+        env:
+          WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
+          TAG: ${{ inputs.tag }}
+          REPO: ${{ github.repository }}
+        run: |
+          if (-not $env:WINGET_TOKEN) {
+            Write-Output "::notice::WINGET_TOKEN is not set: winget not updated"
+            exit 0
+          }
+          if ($env:TAG -notmatch '^v\d+\.\d+\.\d+$') {
+            Write-Output "::error::Not a version tag: $env:TAG"
+            exit 1
+          }
+          $version = $env:TAG.Substring(1)
+          Invoke-WebRequest https://aka.ms/wingetcreate/latest -OutFile wingetcreate.exe
+          $headers = @{ Authorization = "Bearer $env:WINGET_TOKEN" }
+          $listed = $true
+          try {
+            Invoke-RestMethod -Headers $headers https://api.github.com/repos/microsoft/winget-pkgs/contents/manifests/l/lamzii/P2PShare | Out-Null
+          } catch {
+            $listed = $false
+          }
+          if ($listed) {
+            $url = "https://github.com/$env:REPO/releases/download/$env:TAG/P2PShare_${version}_x64-setup.exe"
+            ./wingetcreate.exe update lamzii.P2PShare --version $version --urls $url --token $env:WINGET_TOKEN --submit
+          } elseif (Test-Path "winget/$version") {
+            ./wingetcreate.exe submit --token $env:WINGET_TOKEN --prtitle "New package: lamzii.P2PShare version $version" "winget/$version"
+          } else {
+            Write-Output "::error::lamzii.P2PShare is not on winget yet (or its first pull request is not merged), and winget/$version has no manifests to submit"
+            exit 1
+          }
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
