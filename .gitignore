@@ -11,3 +11,7 @@ Thumbs.db
 .vscode
 .idea
 release/
+# The Android release key and its password.
+P2PShare-cle-android/
+*.jks
+secrets-github.txt

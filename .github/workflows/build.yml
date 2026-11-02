@@ -283,6 +283,16 @@ jobs:
             done > SHA256SUMS.txt
           cat SHA256SUMS.txt
 
+      # A stable release must carry the APK: without the release key, stop
+      # before anything is published or sent to winget.
+      - name: Check the APK
+        if: ${{ !contains(github.ref_name, '-') }}
+        run: |
+          if [ -z "$(find artifacts -name '*.apk')" ]; then
+            echo "::error::No APK in this release: the ANDROID_KEYSTORE_BASE64 secret is not set"
+            exit 1
+          fi
+
       # The APK comes only with the release key set up.
       - name: List the release files
         id: files

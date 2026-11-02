@@ -1,18 +1,32 @@
 # The workflow pins actions to commit SHAs: Dependabot proposes updates.
 # It also proposes updates of the Rust crates and npm packages.
+# One monthly pull request per ecosystem for minor and patch updates, since
+# each one runs a full build; major updates stay separate, they can break.
 version: 2
 updates:
   - package-ecosystem: github-actions
     directory: /
     schedule:
-      interval: weekly
+      interval: monthly
+    groups:
+      github-actions:
+        patterns: ['*']
+        update-types: [minor, patch]
 
   - package-ecosystem: cargo
     directory: /src-tauri
     schedule:
-      interval: weekly
+      interval: monthly
+    groups:
+      cargo:
+        patterns: ['*']
+        update-types: [minor, patch]
 
   - package-ecosystem: npm
     directory: /
     schedule:
-      interval: weekly
+      interval: monthly
+    groups:
+      npm:
+        patterns: ['*']
+        update-types: [minor, patch]
