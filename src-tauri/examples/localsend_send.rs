@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use iroh::SecretKey;
 use p2pshare_lib::localsend::{Hooks, Identity, LocalSend};
-use p2pshare_lib::p2p::{Messages, Node, Options, Status};
+use p2pshare_lib::p2p::{Node, Options, Status};
 use p2pshare_lib::store::JsonStore;
 
 const FIND_TIMEOUT: Duration = Duration::from_secs(20);
@@ -45,7 +45,7 @@ async fn main() {
     let node = Node::start(Options {
         secret: SecretKey::generate(),
         friends: JsonStore::load(work.join("friends.json"), Vec::new()),
-        messages: JsonStore::load(work.join("messages.json"), Messages::new()),
+        messages_dir: work.join("messages"),
         download_dir: Arc::new(move || downloads.clone()),
         on_event: Arc::new(|_| {}),
         groups_dir: work.join("groups"),

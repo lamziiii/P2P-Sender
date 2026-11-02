@@ -5,7 +5,7 @@
 // OneDrive would sync them all. Only the finished files land here.
 
 import { spawnSync } from 'node:child_process';
-import { copyFileSync, existsSync, mkdirSync, readdirSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
@@ -24,6 +24,14 @@ if (build.status !== 0) process.exit(build.status ?? 1);
 
 const out = join(root, 'release');
 mkdirSync(out, { recursive: true });
+// Bundle folders keep every version ever built: only this one is copied,
+// and installers of other versions are removed from release/.
+const { version } = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
+const installer = /^P2PShare_(\d+\.\d+\.\d+[^_]*)_/;
+for (const name of readdirSync(out)) {
+  const m = name.match(installer);
+  if (m && m[1] !== version) rmSync(join(out, name));
+}
 const copied = [];
 const copy = (from, name) => {
   copyFileSync(from, join(out, name));
@@ -37,7 +45,9 @@ for (const exe of ['p2pshare.exe', 'p2pshare']) {
 for (const [folder, ext] of [['nsis', '.exe'], ['msi', '.msi'], ['dmg', '.dmg'], ['appimage', '.AppImage'], ['deb', '.deb']]) {
   const dir = join(release, 'bundle', folder);
   if (!existsSync(dir)) continue;
-  for (const name of readdirSync(dir).filter(n => n.endsWith(ext))) copy(join(dir, name), name);
+  for (const name of readdirSync(dir).filter(n => n.endsWith(ext) && n.match(installer)?.[1] === version)) {
+    copy(join(dir, name), name);
+  }
 }
 
 console.log(`\nCopié dans ${out} :\n  ${copied.join('\n  ')}`);

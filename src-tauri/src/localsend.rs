@@ -27,6 +27,7 @@ use std::convert::Infallible;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -66,16 +67,31 @@ const MAX_TEXT: usize = 100_000;
 const DECISION_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 /// Requests that reach the user (files, messages) per device and minute.
 const PROMPTS_PER_MINUTE: usize = 10;
-/// Devices kept in the list.
+/// Devices kept in the list, and among them at most that many whose
+/// fingerprint is only claimed: those never push out the proven ones.
 const MAX_DEVICES: usize = 256;
+const MAX_UNVERIFIED: usize = 128;
+/// Fingerprints proven by a certificate that we keep in mind.
+const MAX_VERIFIED: usize = 4096;
+/// Last addresses of the devices we exchanged with, kept past `DEVICE_TTL`.
+const MAX_KNOWN: usize = 256;
+/// Longest fingerprint taken from a device (LocalSend's are hex or UUIDs).
+const MAX_FINGERPRINT: usize = 128;
 /// Announcements processed per source address and `INTERFACE_CHECK`.
 const ANNOUNCES_PER_IP: usize = 20;
-/// Registrations with announcing devices at the same time.
+/// Registrations with announcing devices at the same time, and per minute.
 const MAX_REGISTERS: usize = 8;
+const REGISTERS_PER_MINUTE: usize = 60;
 /// Open HTTPS connections, in all and per device.
-const MAX_CONNECTIONS: usize = 64;
+const MAX_CONNECTIONS: usize = 128;
 const MAX_CONNECTIONS_PER_IP: usize = 8;
-const HEADER_TIMEOUT: Duration = Duration::from_secs(30);
+/// For the headers of a request (also between requests on a connection),
+/// and for the whole JSON body of one.
+const HEADER_TIMEOUT: Duration = Duration::from_secs(15);
+const BODY_TIMEOUT: Duration = Duration::from_secs(15);
+/// How long we look for a device no longer listed before sending to it.
+const FIND_TIMEOUT: Duration = Duration::from_secs(4);
+const FIND_CHECK: Duration = Duration::from_millis(200);
 /// The list of devices is sent to the window at most that often.
 const DEVICES_REFRESH: Duration = Duration::from_secs(1);
 /// A session without any progress for that long is abandoned.
@@ -85,7 +101,11 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const REGISTER_TIMEOUT: Duration = Duration::from_secs(5);
 /// Peers repeat their announcement a few times: answer each device once.
 const REGISTER_INTERVAL: Duration = Duration::from_secs(5);
+/// How often our interfaces are looked at again, unless the system reports
+/// network changes (`LocalSend::network_changed`).
 const INTERFACE_CHECK: Duration = Duration::from_secs(10);
+/// When it does, in case a change went unreported.
+const INTERFACE_FALLBACK: Duration = Duration::from_secs(60);
 /// Devices not heard from for that long are no longer offered.
 const DEVICE_TTL: Duration = Duration::from_secs(30 * 60);
 /// An announcement is repeated, as datagrams get lost and devices that just
@@ -417,6 +437,36 @@ fn clean_alias(alias: &str) -> String {
     }
 }
 
+/// The key of a device whose fingerprint is only claimed, the same in the
+/// list of devices and for its requests, so that both meet in one chat.
+fn claimed_key(fingerprint: &str) -> Option<String> {
+    let fingerprint = fingerprint.trim();
+    let valid = !fingerprint.is_empty()
+        && fingerprint.len() <= MAX_FINGERPRINT
+        && fingerprint.bytes().all(|b| b.is_ascii_graphic());
+    valid.then(|| fingerprint.to_ascii_uppercase())
+}
+
+/// Calls `done` once: with the outcome, or with an error if the task carrying
+/// it is dropped first (the service stopped).
+struct Done<F: FnOnce(Result<(), String>)>(Option<F>);
+
+impl<F: FnOnce(Result<(), String>)> Done<F> {
+    fn call(mut self, result: Result<(), String>) {
+        if let Some(done) = self.0.take() {
+            done(result);
+        }
+    }
+}
+
+impl<F: FnOnce(Result<(), String>)> Drop for Done<F> {
+    fn drop(&mut self) {
+        if let Some(done) = self.0.take() {
+            done(Err("LocalSend désactivé".into()));
+        }
+    }
+}
+
 // ─── Service ─────────────────────────────────────────────────────────────────
 
 /// Who sent a text message.
@@ -450,8 +500,21 @@ struct Inner {
     /// Devices that made themselves known, by fingerprint, with when each
     /// was last heard from.
     devices: Mutex<HashMap<String, (Device, Instant)>>,
-    /// Asks the discovery task to announce us again.
-    scan: mpsc::UnboundedSender<()>,
+    /// Fingerprints a certificate proved, with when last (none: told by the
+    /// app, kept for good). Kept past the list of devices: a device claiming
+    /// one of them over plain HTTP is refused, even once the real one left
+    /// the list.
+    verified: Mutex<HashMap<String, Option<Instant>>>,
+    /// Where the devices we exchanged with were last, by fingerprint, to
+    /// find them again once they left the list.
+    known: Mutex<HashMap<String, (Device, Instant)>>,
+    /// The networks of our interfaces, and when we last looked.
+    nets: Mutex<(Instant, Vec<netdev::ipnet::Ipv4Net>)>,
+    /// For the discovery task.
+    signals: mpsc::UnboundedSender<Signal>,
+    /// The system reports network changes: interfaces are looked at only
+    /// every `INTERFACE_FALLBACK` otherwise.
+    network_watched: AtomicBool,
     /// Sending sessions in progress.
     sends: Mutex<Vec<AbortHandle>>,
     /// When each address last asked for the user's attention.
@@ -459,8 +522,22 @@ struct Inner {
     /// Open HTTPS connections per address.
     connections: Mutex<HashMap<IpAddr, usize>>,
     /// The list of devices changed since the window last got it.
-    devices_dirty: std::sync::atomic::AtomicBool,
+    devices_dirty: AtomicBool,
     devices_sent: Mutex<Instant>,
+}
+
+/// What the discovery task is asked.
+enum Signal {
+    /// Forget who was answered, and announce us.
+    Scan,
+    /// Our interfaces may have changed.
+    NetworkChanged,
+    /// Back from sleep: look at our interfaces, and announce us.
+    Resumed,
+    /// Economy on or off (see `LocalSend::set_economy`).
+    Economy(bool),
+    /// The window is due the list of devices at that time.
+    DevicesDue(Instant),
 }
 
 /// A LocalSend device on the network.
@@ -539,7 +616,7 @@ impl LocalSend {
         let connector = tls_connector(id, None).map_err(io::Error::other)?;
         let listener = bind_listener().await?;
         let port = listener.local_addr()?.port();
-        let (scan, scans) = mpsc::unbounded_channel();
+        let (signals, signals_rx) = mpsc::unbounded_channel();
         let inner = Arc::new(Inner {
             node,
             hooks,
@@ -551,17 +628,21 @@ impl LocalSend {
             connector,
             session: Mutex::new(None),
             devices: Mutex::new(HashMap::new()),
-            scan,
+            verified: Mutex::new(HashMap::new()),
+            known: Mutex::new(HashMap::new()),
+            nets: Mutex::new((Instant::now(), local_nets())),
+            signals,
+            network_watched: AtomicBool::new(false),
             sends: Mutex::new(Vec::new()),
             prompts: Mutex::new(HashMap::new()),
             connections: Mutex::new(HashMap::new()),
-            devices_dirty: std::sync::atomic::AtomicBool::new(false),
+            devices_dirty: AtomicBool::new(false),
             devices_sent: Mutex::new(Instant::now() - DEVICES_REFRESH),
         });
         let mut tasks = vec![tokio::spawn(inner.clone().serve(listener, acceptor)).abort_handle()];
         let discovery_error = match multicast_socket() {
             Ok(socket) => {
-                tasks.push(tokio::spawn(inner.clone().discovery(socket, scans)).abort_handle());
+                tasks.push(tokio::spawn(inner.clone().discovery(socket, signals_rx)).abort_handle());
                 None
             }
             Err(e) => Some(format!("Découverte automatique indisponible : {e}")),
@@ -609,25 +690,65 @@ impl LocalSend {
     pub fn scan(&self) {
         self.inner.devices().clear();
         (self.inner.hooks.on_devices)();
-        let _ = self.inner.scan.send(());
+        let _ = self.inner.signals.send(Signal::Scan);
     }
 
-    /// Send a text message to a device; `done` gets the outcome.
+    /// The system reports network changes, and `network_changed` is called
+    /// on each: interfaces are then only looked at now and then otherwise.
+    pub fn set_network_watched(&self, watched: bool) {
+        self.inner.network_watched.store(watched, Ordering::Relaxed);
+    }
+
+    /// An interface or address changed: join the networks that appeared, and
+    /// announce us there.
+    pub fn network_changed(&self) {
+        let _ = self.inner.signals.send(Signal::NetworkChanged);
+    }
+
+    /// Back from sleep: announce us again.
+    pub fn resumed(&self) {
+        let _ = self.inner.signals.send(Signal::Resumed);
+    }
+
+    /// While on (session locked, on battery), we no longer announce
+    /// ourselves nor look at our interfaces on a timer, but devices still
+    /// get answers, and their files and texts come as usual. Turned off, it
+    /// catches up and announces us.
+    pub fn set_economy(&self, on: bool) {
+        let _ = self.inner.signals.send(Signal::Economy(on));
+    }
+
+    /// Fingerprints the app knows as proven by a certificate (its chats with
+    /// verified devices): a device claiming one of them without it is
+    /// refused, as for those proven since the service started.
+    pub fn remember_verified<'a>(&self, fingerprints: impl IntoIterator<Item = &'a str>) {
+        let mut verified = self.inner.verified();
+        for fingerprint in fingerprints {
+            verified.insert(fingerprint.to_ascii_uppercase(), None);
+        }
+    }
+
+    /// Send a text message to a device; `done` gets the outcome, also when
+    /// the service stops first.
     pub fn send_text(
         &self,
         fingerprint: &str,
         text: String,
         done: impl FnOnce(Result<(), String>) + Send + 'static,
     ) -> Result<(), &'static str> {
-        let device = self
-            .inner
-            .devices()
-            .get(fingerprint)
-            .map(|(d, _)| d.clone())
-            .ok_or("Appareil introuvable : est-il allumé, avec LocalSend ouvert ?")?;
+        const NOT_FOUND: &str = "Appareil introuvable : est-il allumé, avec LocalSend ouvert ?";
+        let target = self.inner.target(fingerprint).ok_or(NOT_FOUND)?;
         let inner = self.inner.clone();
+        let done = Done(Some(done));
         let task = self.inner.rt.spawn(async move {
-            done(inner.send_text(device, text).await);
+            let result = match inner.resolve(target).await {
+                Some(device) => {
+                    inner.note_known(&device);
+                    inner.send_text(device, text).await
+                }
+                None => Err(NOT_FOUND.into()),
+            };
+            done.call(result);
         });
         let mut sends = self.inner.sends.lock().unwrap_or_else(|e| e.into_inner());
         sends.retain(|t| !t.is_finished());
@@ -637,12 +758,11 @@ impl LocalSend {
 
     /// Send files to a device; returns how many will be offered to it.
     pub fn send_files(&self, fingerprint: &str, paths: &[PathBuf]) -> Result<usize, &'static str> {
-        let device = self
+        let target = self
             .inner
-            .devices()
-            .get(fingerprint)
-            .map(|(d, _)| d.clone())
+            .target(fingerprint)
             .ok_or("Appareil introuvable : relancez la recherche")?;
+        let device = &target.0;
         let files: Vec<(PathBuf, u64)> = paths
             .iter()
             .filter_map(|p| {
@@ -663,7 +783,7 @@ impl LocalSend {
         let task = self
             .inner
             .rt
-            .spawn(self.inner.clone().send_session(device, outgoing));
+            .spawn(self.inner.clone().send_session(target, outgoing));
         let mut sends = self.inner.sends.lock().unwrap_or_else(|e| e.into_inner());
         sends.retain(|t| !t.is_finished());
         sends.push(task.abort_handle());
@@ -721,14 +841,21 @@ fn multicast_socket() -> io::Result<UdpSocket> {
     UdpSocket::from_std(socket.into())
 }
 
-/// Our addresses on the networks that can reach LocalSend devices.
-pub(crate) fn local_ipv4s() -> HashSet<Ipv4Addr> {
-    netdev::get_interfaces()
+/// The networks our interfaces are on (as `local_nets`), and our addresses
+/// on those that can reach LocalSend devices, from a single look.
+fn local_networks() -> (Vec<netdev::ipnet::Ipv4Net>, HashSet<Ipv4Addr>) {
+    let interfaces: Vec<_> = netdev::get_interfaces()
         .into_iter()
-        .filter(|i| i.is_up() && !i.is_loopback())
+        .filter(|i| i.is_up())
+        .collect();
+    let ips = interfaces
+        .iter()
+        .filter(|i| !i.is_loopback())
         .flat_map(|i| i.ipv4_addrs())
         .filter(|ip| !ip.is_loopback() && !ip.is_link_local() && !ip.is_unspecified())
-        .collect()
+        .collect();
+    let nets = interfaces.into_iter().flat_map(|i| i.ipv4).collect();
+    (nets, ips)
 }
 
 /// The networks our interfaces are on.
@@ -757,6 +884,36 @@ fn on_local_network(ip: IpAddr, nets: &[netdev::ipnet::Ipv4Net]) -> bool {
     }
 }
 
+/// Room in the list for one more device, proven by its certificate or not:
+/// the oldest of those only claimed go first, and they never push out a
+/// proven one. False if there is none.
+fn make_room(devices: &mut HashMap<String, (Device, Instant)>, verified: bool) -> bool {
+    let unverified = devices.values().filter(|(d, _)| !d.verified).count();
+    let full = devices.len() >= MAX_DEVICES;
+    if !full && (verified || unverified < MAX_UNVERIFIED) {
+        return true;
+    }
+    let oldest = |proven: bool| {
+        devices
+            .iter()
+            .filter(|(_, (d, _))| d.verified == proven)
+            .min_by_key(|(_, (_, seen))| *seen)
+            .map(|(k, _)| k.clone())
+    };
+    let victim = match oldest(false) {
+        Some(k) => Some(k),
+        None if verified => oldest(true),
+        None => None,
+    };
+    match victim {
+        Some(k) => {
+            devices.remove(&k);
+            true
+        }
+        None => false,
+    }
+}
+
 fn canonical(ip: IpAddr) -> IpAddr {
     match ip {
         IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(ip, IpAddr::V4),
@@ -777,10 +934,11 @@ fn reply_json(body: &Value) -> Response<Full<Bytes>> {
     res
 }
 
+/// A JSON body, which a client sending it slowly does not hold for long.
 async fn read_json<T: serde::de::DeserializeOwned>(body: Incoming) -> Option<T> {
-    let bytes = Limited::new(body, MAX_JSON)
-        .collect()
+    let bytes = tokio::time::timeout(BODY_TIMEOUT, Limited::new(body, MAX_JSON).collect())
         .await
+        .ok()?
         .ok()?
         .to_bytes();
     serde_json::from_slice(&bytes).ok()
@@ -811,6 +969,118 @@ impl Inner {
         self.devices.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    fn verified(&self) -> MutexGuard<'_, HashMap<String, Option<Instant>>> {
+        self.verified.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn known(&self) -> MutexGuard<'_, HashMap<String, (Device, Instant)>> {
+        self.known.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Whether a device at `ip` is on the local network (our interfaces
+    /// looked at again every `INTERFACE_CHECK`).
+    fn is_local(&self, ip: IpAddr) -> bool {
+        if on_local_network(ip, &[]) {
+            return true;
+        }
+        let mut nets = self.nets.lock().unwrap_or_else(|e| e.into_inner());
+        if nets.0.elapsed() >= INTERFACE_CHECK {
+            *nets = (Instant::now(), local_nets());
+        }
+        on_local_network(ip, &nets.1)
+    }
+
+    /// A certificate proved `fingerprint`.
+    fn note_verified(&self, fingerprint: &str) {
+        let mut verified = self.verified();
+        match verified.get_mut(fingerprint) {
+            Some(Some(seen)) => *seen = Instant::now(),
+            Some(None) => {}
+            None => {
+                if verified.len() >= MAX_VERIFIED {
+                    let oldest = verified
+                        .iter()
+                        .filter_map(|(k, seen)| Some((k, (*seen)?)))
+                        .min_by_key(|(_, seen)| *seen)
+                        .map(|(k, _)| k.clone());
+                    if let Some(oldest) = oldest {
+                        verified.remove(&oldest);
+                    }
+                }
+                verified.insert(fingerprint.to_string(), Some(Instant::now()));
+            }
+        }
+    }
+
+    fn was_verified(&self, fingerprint: &str) -> bool {
+        self.verified().contains_key(fingerprint)
+    }
+
+    /// Keep where `device` is, to find it again once it left the list.
+    fn note_known(&self, device: &Device) {
+        let mut known = self.known();
+        if !known.contains_key(&device.fingerprint) && known.len() >= MAX_KNOWN {
+            let oldest = known
+                .iter()
+                .min_by_key(|(_, (_, seen))| *seen)
+                .map(|(k, _)| k.clone());
+            if let Some(oldest) = oldest {
+                known.remove(&oldest);
+            }
+        }
+        known.insert(device.fingerprint.clone(), (device.clone(), Instant::now()));
+    }
+
+    /// The device to send to, and whether it is listed: otherwise it was
+    /// last seen at that address, and may have left or moved.
+    fn target(&self, fingerprint: &str) -> Option<(Device, bool)> {
+        let listed = self
+            .devices()
+            .get(fingerprint)
+            .map(|(d, seen)| (d.clone(), seen.elapsed() < DEVICE_TTL));
+        match listed {
+            Some((device, true)) => Some((device, true)),
+            stale => {
+                let known = || self.known().get(fingerprint).map(|(d, _)| d.clone());
+                stale.map(|(d, _)| d).or_else(known).map(|d| (d, false))
+            }
+        }
+    }
+
+    /// Find a device no longer listed: ask it at its last address (its
+    /// certificate must match, if it had one), else on the whole network.
+    async fn resolve(&self, (device, listed): (Device, bool)) -> Option<Device> {
+        if listed {
+            return Some(device);
+        }
+        let start = Instant::now();
+        let fingerprint = device.fingerprint.clone();
+        let found = || {
+            self.devices()
+                .get(&fingerprint)
+                .filter(|(_, seen)| *seen >= start)
+                .map(|(d, _)| d.clone())
+        };
+        // Never in clear to a device that proved its fingerprint.
+        if device.https || !self.was_verified(&fingerprint) {
+            let pin = device.https.then(|| fingerprint.clone());
+            self.register_with(device.ip, device.port, device.https, pin)
+                .await;
+            if let Some(device) = found() {
+                return Some(device);
+            }
+        }
+        let _ = self.signals.send(Signal::Scan);
+        let deadline = Instant::now() + FIND_TIMEOUT;
+        while Instant::now() < deadline {
+            tokio::time::sleep(FIND_CHECK).await;
+            if let Some(device) = found() {
+                return Some(device);
+            }
+        }
+        None
+    }
+
     /// Note a device that made itself known: `info` is what it says about
     /// itself, `cert` the fingerprint its certificate proves, if we saw it.
     fn remember(
@@ -826,13 +1096,19 @@ impl Inner {
             // A claim the certificate contradicts is not trusted.
             Some(cert) if !info.fingerprint.eq_ignore_ascii_case(&cert) => return,
             Some(cert) => cert,
-            None if https => info.fingerprint.to_ascii_uppercase(),
-            None => info.fingerprint.clone(),
+            None => match claimed_key(&info.fingerprint) {
+                Some(key) => key,
+                None => return,
+            },
         };
-        if fingerprint.is_empty()
-            || fingerprint.len() > 128
-            || fingerprint.eq_ignore_ascii_case(&self.fingerprint)
-        {
+        if fingerprint.eq_ignore_ascii_case(&self.fingerprint) {
+            return;
+        }
+        if verified {
+            self.note_verified(&fingerprint);
+        } else if !https && self.was_verified(&fingerprint) {
+            // A fingerprint once proven is only taken again over HTTPS,
+            // where the certificate must match it when we send.
             return;
         }
         let device = Device {
@@ -866,36 +1142,70 @@ impl Inner {
                     devices.insert(fingerprint, (known.clone(), Instant::now()));
                     return;
                 }
-            } else if devices.len() >= MAX_DEVICES {
-                let oldest = devices
-                    .iter()
-                    .min_by_key(|(_, (_, seen))| *seen)
-                    .map(|(k, _)| k.clone());
-                if let Some(oldest) = oldest {
-                    devices.remove(&oldest);
+            } else if !make_room(&mut devices, verified) {
+                return;
+            }
+            devices.insert(fingerprint.clone(), (device.clone(), Instant::now()));
+            known != Some(device.clone())
+        };
+        // The address kept for a device we exchanged with follows it, but a
+        // mere claim does not replace a proven one.
+        {
+            let mut known = self.known();
+            if let Some((kept, seen)) = known.get_mut(&fingerprint) {
+                if verified || (!kept.verified && (device.https || !kept.https)) {
+                    *kept = device;
+                    *seen = Instant::now();
                 }
             }
-            devices.insert(fingerprint, (device.clone(), Instant::now()));
-            known != Some(device)
-        };
+        }
         if changed {
             self.devices_changed();
         }
     }
 
     /// Tell the window, at most every `DEVICES_REFRESH` (the discovery task
-    /// sends what is left over).
+    /// sends what is left over once the delay is over).
     fn devices_changed(&self) {
-        use std::sync::atomic::Ordering;
         let mut sent = self.devices_sent.lock().unwrap_or_else(|e| e.into_inner());
         if sent.elapsed() >= DEVICES_REFRESH {
             *sent = Instant::now();
             self.devices_dirty.store(false, Ordering::Relaxed);
             drop(sent);
             (self.hooks.on_devices)();
-        } else {
-            self.devices_dirty.store(true, Ordering::Relaxed);
+        } else if !self.devices_dirty.swap(true, Ordering::Relaxed) {
+            let _ = self.signals.send(Signal::DevicesDue(*sent + DEVICES_REFRESH));
         }
+    }
+
+    fn check_period(&self) -> Duration {
+        if self.network_watched.load(Ordering::Relaxed) {
+            INTERFACE_FALLBACK
+        } else {
+            INTERFACE_CHECK
+        }
+    }
+
+    /// Look at our interfaces again, and join the multicast group on the new
+    /// ones: true if there are.
+    async fn check_interfaces(
+        &self,
+        socket: &UdpSocket,
+        joined: &mut HashSet<Ipv4Addr>,
+        nets: &mut Vec<netdev::ipnet::Ipv4Net>,
+    ) -> bool {
+        let Ok((found, ips)) = tokio::task::spawn_blocking(local_networks).await else {
+            return false;
+        };
+        *nets = found;
+        *self.nets.lock().unwrap_or_else(|e| e.into_inner()) = (Instant::now(), nets.clone());
+        self.devices().retain(|_, (_, seen)| seen.elapsed() < DEVICE_TTL);
+        let new: Vec<_> = ips.difference(joined).copied().collect();
+        for ip in &new {
+            let _ = socket.join_multicast_v4(MULTICAST, *ip);
+        }
+        *joined = ips;
+        !new.is_empty()
     }
 
     /// Whether `ip` may ask the user something again (files or a message).
@@ -938,45 +1248,70 @@ impl Inner {
 
     // ─── Discovery ───────────────────────────────────────────────────────────
 
-    async fn discovery(self: Arc<Self>, socket: UdpSocket, mut scans: mpsc::UnboundedReceiver<()>) {
+    async fn discovery(
+        self: Arc<Self>,
+        socket: UdpSocket,
+        mut signals: mpsc::UnboundedReceiver<Signal>,
+    ) {
         let mut joined = HashSet::new();
-        let mut check = tokio::time::interval(INTERFACE_CHECK);
+        // Right away, then every `check_period` (not in economy).
+        let mut next_check = Instant::now();
+        let mut economy = false;
         let mut burst: Vec<Instant> = Vec::new();
         let mut answered: HashMap<IpAddr, Instant> = HashMap::new();
-        let mut heard: HashMap<IpAddr, usize> = HashMap::new();
+        // Announcements per address since then (`INTERFACE_CHECK` at most).
+        let mut heard: (Instant, HashMap<IpAddr, usize>) = (Instant::now(), HashMap::new());
+        let mut registered: Vec<Instant> = Vec::new();
         let mut nets = Vec::new();
         let mut registers = JoinSet::new();
-        let mut refresh = tokio::time::interval(DEVICES_REFRESH);
+        let mut devices_due: Option<Instant> = None;
         let mut buf = vec![0u8; 65536];
+        let announce_burst = || {
+            let now = Instant::now();
+            ANNOUNCE_DELAYS.iter().map(|d| now + *d).collect::<Vec<_>>()
+        };
         loop {
             let next = burst.first().copied();
             tokio::select! {
-                _ = refresh.tick() => {
-                    if self.devices_dirty.load(std::sync::atomic::Ordering::Relaxed) {
+                _ = tokio::time::sleep_until(devices_due.unwrap_or_else(Instant::now).into()), if devices_due.is_some() => {
+                    devices_due = None;
+                    if self.devices_dirty.load(Ordering::Relaxed) {
                         self.devices_changed();
                     }
                 }
-                _ = check.tick() => {
-                    heard.clear();
-                    nets = local_nets();
-                    self.devices().retain(|_, (_, seen)| seen.elapsed() < DEVICE_TTL);
-                    let ips = local_ipv4s();
-                    let new: Vec<_> = ips.difference(&joined).copied().collect();
-                    for ip in &new {
-                        let _ = socket.join_multicast_v4(MULTICAST, *ip);
-                    }
-                    joined = ips;
-                    if !new.is_empty() {
-                        let now = Instant::now();
-                        burst = ANNOUNCE_DELAYS.iter().map(|d| now + *d).collect();
+                _ = tokio::time::sleep_until(next_check.into()), if !economy => {
+                    if self.check_interfaces(&socket, &mut joined, &mut nets).await {
+                        burst = announce_burst();
                     }
                     answered.retain(|_, t| t.elapsed() < REGISTER_INTERVAL);
+                    next_check = Instant::now() + self.check_period();
                 }
-                Some(()) = scans.recv() => {
-                    let now = Instant::now();
-                    burst = ANNOUNCE_DELAYS.iter().map(|d| now + *d).collect();
-                    answered.clear();
-                }
+                Some(signal) = signals.recv() => match signal {
+                    Signal::Scan => {
+                        burst = announce_burst();
+                        answered.clear();
+                    }
+                    Signal::NetworkChanged | Signal::Resumed => {
+                        let resumed = matches!(signal, Signal::Resumed);
+                        let new = self.check_interfaces(&socket, &mut joined, &mut nets).await;
+                        if (new || resumed) && !economy {
+                            burst = announce_burst();
+                        }
+                        next_check = Instant::now() + self.check_period();
+                    }
+                    Signal::Economy(on) => {
+                        if economy && !on {
+                            // Catch up on what changed meanwhile.
+                            self.check_interfaces(&socket, &mut joined, &mut nets).await;
+                            next_check = Instant::now() + self.check_period();
+                            burst = announce_burst();
+                        }
+                        economy = on;
+                    }
+                    Signal::DevicesDue(at) => {
+                        devices_due = Some(devices_due.map_or(at, |due| due.min(at)));
+                    }
+                },
                 _ = tokio::time::sleep_until(next.unwrap_or_else(Instant::now).into()), if next.is_some() => {
                     burst.remove(0);
                     self.announce(&socket, &joined, true).await;
@@ -992,8 +1327,12 @@ impl Inner {
                     // previous send shows up on the next receive).
                     let Ok((len, from)) = received else { continue };
                     let ip = canonical(from.ip());
+                    if heard.0.elapsed() >= INTERFACE_CHECK {
+                        heard = (Instant::now(), HashMap::new());
+                        answered.retain(|_, t| t.elapsed() < REGISTER_INTERVAL);
+                    }
                     // Only devices of the local network, each a few times.
-                    let count = heard.entry(ip).or_default();
+                    let count = heard.1.entry(ip).or_default();
                     *count += 1;
                     if !on_local_network(ip, &nets) || *count > ANNOUNCES_PER_IP {
                         continue;
@@ -1018,9 +1357,15 @@ impl Inner {
                     if answered.get(&ip).is_some_and(|t| t.elapsed() < REGISTER_INTERVAL) {
                         continue;
                     }
+                    // Source addresses can be forged: not many in all either.
+                    registered.retain(|t| t.elapsed() < Duration::from_secs(60));
+                    if registered.len() >= REGISTERS_PER_MINUTE {
+                        continue;
+                    }
+                    registered.push(Instant::now());
                     answered.insert(ip, Instant::now());
                     let inner = self.clone();
-                    registers.spawn(async move { inner.register_with(ip, port, https).await });
+                    registers.spawn(async move { inner.register_with(ip, port, https, None).await });
                 }
             }
         }
@@ -1039,13 +1384,14 @@ impl Inner {
         }
     }
 
-    /// Introduce ourselves to a device that announced itself.
-    async fn register_with(&self, ip: IpAddr, port: u16, https: bool) -> bool {
+    /// Introduce ourselves to a device that announced itself, or that we
+    /// look for (`pin`: the fingerprint its certificate must have).
+    async fn register_with(&self, ip: IpAddr, port: u16, https: bool, pin: Option<String>) -> bool {
         let peer = send::Peer {
             ip,
             port,
             https,
-            pin: None,
+            pin,
         };
         let body = send::json_body(&self.advertisement(None));
         let path = format!("{API}/register");
@@ -1072,8 +1418,12 @@ impl Inner {
                         tokio::time::sleep(Duration::from_millis(100)).await;
                         continue;
                     };
-                    let Some(slot) = self.clone().connection_slot(canonical(addr.ip()), conns.len())
-                    else {
+                    // Only devices of the local network.
+                    let ip = canonical(addr.ip());
+                    if !self.is_local(ip) {
+                        continue;
+                    }
+                    let Some(slot) = self.clone().connection_slot(ip, conns.len()) else {
                         continue;
                     };
                     conns.spawn(self.clone().connection(tcp, addr, acceptor.clone(), slot));
@@ -1182,17 +1532,35 @@ impl Inner {
         if request.files.is_empty() || request.files.len() > MAX_FILES {
             return reply(StatusCode::BAD_REQUEST);
         }
+        // Keyed like the list of devices, to land in the same chat.
+        let Some(key) = cert
+            .clone()
+            .or_else(|| claimed_key(&request.info.fingerprint))
+        else {
+            return reply(StatusCode::BAD_REQUEST);
+        };
+        let text = message_text(&request);
+        // Busy: the request does not reach the user, so it does not count.
+        if text.is_none() && self.session().is_some() {
+            return reply(StatusCode::CONFLICT);
+        }
         // Anyone on the network can ask: not over and over.
         if !self.may_prompt(ip) {
             return reply(StatusCode::TOO_MANY_REQUESTS);
         }
-        if let Some(text) = message_text(&request) {
-            // Keyed like the list of devices, to land in the same chat.
+        if let Some(text) = text {
+            // Its address, to answer in the chat once it left the list.
+            let listed = self
+                .devices()
+                .get(&key)
+                .filter(|(d, _)| d.ip == ip && (d.verified || cert.is_none()))
+                .map(|(d, _)| d.clone());
+            if let Some(device) = listed {
+                self.note_known(&device);
+            }
             let sender = TextSender {
                 verified: cert.is_some(),
-                fingerprint: cert.clone().unwrap_or_else(|| {
-                    clean_alias(&request.info.fingerprint).to_ascii_uppercase()
-                }),
+                fingerprint: key,
                 alias: clean_alias(&request.info.alias),
             };
             (self.hooks.on_text)(sender, text);
@@ -1226,11 +1594,8 @@ impl Inner {
         // The certificate proves who the sender is; the fingerprint claimed
         // by older versions without one proves nothing, and is kept apart.
         let peer_id = match cert {
-            Some(cert) => format!("localsend:{cert}"),
-            None => format!(
-                "localsend-unverified:{}",
-                clean_alias(&request.info.fingerprint).to_ascii_uppercase()
-            ),
+            Some(_) => format!("localsend:{key}"),
+            None => format!("localsend-unverified:{key}"),
         };
         let (ids, files): (Vec<String>, Vec<ExternalFile>) = request
             .files
@@ -1249,22 +1614,26 @@ impl Inner {
             s.tids = tids.clone();
         }
 
+        // The files left unanswered in time are withdrawn; those the user
+        // accepted meanwhile still come.
+        let deadline = tokio::time::Instant::now() + DECISION_TIMEOUT;
         let decisions = async {
             let mut accepted = Vec::with_capacity(offers.len());
-            for (_, answer) in offers {
-                accepted.push(answer.await.unwrap_or(false));
+            for (tid, answer) in offers {
+                accepted.push(match tokio::time::timeout_at(deadline, answer).await {
+                    Ok(answer) => answer.unwrap_or(false),
+                    Err(_) => {
+                        self.node
+                            .external_stop(&tid, Status::Cancelled, Some("Sans réponse à temps"));
+                        false
+                    }
+                });
             }
             accepted
         };
         let accepted = tokio::select! {
             accepted = decisions => accepted,
             _ = cancelled.notified() => return reply(StatusCode::FORBIDDEN),
-            _ = tokio::time::sleep(DECISION_TIMEOUT) => {
-                for tid in &tids {
-                    self.node.external_stop(tid, Status::Cancelled, Some("Sans réponse à temps"));
-                }
-                return reply(StatusCode::FORBIDDEN);
-            }
         };
 
         let mut tokens = serde_json::Map::new();
@@ -1483,5 +1852,54 @@ impl Drop for StopGuard {
                 self.node.external_stop(tid, self.status, Some(self.error));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn device(fingerprint: &str, verified: bool) -> Device {
+        Device {
+            fingerprint: fingerprint.into(),
+            alias: "x".into(),
+            model: None,
+            kind: None,
+            ip: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 2)),
+            port: PORT,
+            https: verified,
+            verified,
+        }
+    }
+
+    #[test]
+    fn claimed_keys_match_the_list() {
+        let uuid = "3f2a8c1e-7b4d-4e9a-b2c6-0d1e5f6a7b8c-and-some-more";
+        assert_eq!(claimed_key(uuid), Some(uuid.to_ascii_uppercase()));
+        assert_eq!(claimed_key(" ab "), Some("AB".into()));
+        assert_eq!(claimed_key(""), None);
+        assert_eq!(claimed_key("a b"), None);
+        assert_eq!(claimed_key(&"a".repeat(MAX_FINGERPRINT + 1)), None);
+    }
+
+    #[test]
+    fn claimed_devices_never_push_out_proven_ones() {
+        let mut devices = HashMap::new();
+        for i in 0..MAX_DEVICES - MAX_UNVERIFIED {
+            let fp = format!("V{i}");
+            devices.insert(fp.clone(), (device(&fp, true), Instant::now()));
+        }
+        for i in 0..MAX_UNVERIFIED * 3 {
+            let fp = format!("U{i}");
+            if make_room(&mut devices, false) {
+                devices.insert(fp.clone(), (device(&fp, false), Instant::now()));
+            }
+        }
+        let proven = devices.values().filter(|(d, _)| d.verified).count();
+        assert_eq!(proven, MAX_DEVICES - MAX_UNVERIFIED);
+        assert!(devices.len() <= MAX_DEVICES);
+        // A proven device still gets in, in place of a claimed one.
+        assert!(make_room(&mut devices, true));
+        assert_eq!(devices.len(), MAX_DEVICES - 1);
     }
 }

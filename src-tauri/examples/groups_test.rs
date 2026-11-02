@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use iroh::SecretKey;
-use p2pshare_lib::p2p::{CustomRelay, Messages, Node, Options};
+use p2pshare_lib::p2p::{CustomRelay, Node, Options};
 use p2pshare_lib::store::JsonStore;
 
 const TIMEOUT: Duration = Duration::from_secs(90);
@@ -40,7 +40,7 @@ impl Peer {
         Node::start(Options {
             secret: self.secret.clone(),
             friends: JsonStore::load(self.dir.join("friends.json"), Vec::new()),
-            messages: JsonStore::load(self.dir.join("messages.json"), Messages::new()),
+            messages_dir: self.dir.join("messages"),
             download_dir: Arc::new(move || downloads.clone()),
             on_event: Arc::new(|_| {}),
             groups_dir: self.dir.join("groups"),
@@ -154,6 +154,69 @@ async fn main() {
             .any(|m| m.mine && m.received_by == 2 && m.total == 2)
     })
     .await;
+
+    let log = pc.dir.join("groups").join(format!("{gid}.jsonl"));
+    wait("journal de C chiffré sur le disque", || {
+        std::fs::read_to_string(&log)
+            .is_ok_and(|t| t.lines().count() > 3 && t.lines().all(|l| l.starts_with("pv1:")))
+    })
+    .await;
+
+    println!("2b. Mentions, épingles, sourdine, dossier déposé");
+    assert!(b
+        .group_detail(&gid)
+        .is_some_and(|d| d.members.iter().any(|m| m.handle == "carol")));
+    b.set_group_muted(&gid, true);
+    assert!(b.groups().groups.iter().any(|g| g.id == gid && g.muted));
+    c.group_send(&gid, "@Bob tu as vu ?").unwrap();
+    wait("B voit qu'on le mentionne", || {
+        b.group_messages(&gid)
+            .iter()
+            .any(|m| m.text == "@Bob tu as vu ?" && m.mentions_me)
+    })
+    .await;
+    assert!(a.group_messages(&gid).iter().all(|m| !m.mentions_me));
+    assert!(b
+        .groups()
+        .groups
+        .iter()
+        .any(|g| g.id == gid && g.unread_mentions == 1));
+    let mid = a.group_messages(&gid)[0].id.clone();
+    a.group_pin(&gid, &mid, true).unwrap();
+    wait("C voit le message épinglé", || {
+        c.group_detail(&gid).is_some_and(|d| d.pins.len() == 1 && d.pins[0].target == mid)
+            && c.group_messages(&gid).iter().any(|m| m.id == mid && m.pinned)
+    })
+    .await;
+    b.group_pin(&gid, &mid, false).unwrap();
+    wait("A voit le message désépinglé", || {
+        a.group_detail(&gid).is_some_and(|d| d.pins.is_empty())
+    })
+    .await;
+    let folder = work.join("dossier");
+    std::fs::create_dir_all(folder.join("sous")).unwrap();
+    std::fs::write(folder.join("a.txt"), b"a").unwrap();
+    std::fs::write(folder.join("sous").join("b.txt"), b"b").unwrap();
+    assert_eq!(a.group_add_paths(&gid, vec![folder]).await, 2);
+    wait("C voit les fichiers du dossier avec leur chemin", || {
+        let files = c.group_files(&gid);
+        files.len() == 2
+            && files.iter().any(|f| f.dir.as_deref() == Some("dossier/sous") && f.name == "b.txt")
+    })
+    .await;
+    let sub = c.group_files(&gid).into_iter().find(|f| f.name == "b.txt").unwrap();
+    c.group_download(&gid, &sub.id).unwrap();
+    wait("C range le fichier du dossier dans son dossier", || {
+        c.group_file_path(&gid, &sub.id).is_some_and(|p| {
+            p.ends_with(Path::new("P2PShare/Projet/dossier/sous/b.txt"))
+                && std::fs::read(&p).is_ok_and(|d| d == b"b")
+        })
+    })
+    .await;
+    for f in a.group_files(&gid) {
+        a.group_delete_file(&gid, &f.id);
+    }
+    wait("dépôt vidé", || c.group_files(&gid).is_empty()).await;
 
     println!("3. Relais vers un membre hors ligne");
     c.shutdown().await;

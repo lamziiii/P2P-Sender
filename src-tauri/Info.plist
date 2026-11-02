@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Merged by Tauri into the app's Info.plist. -->
+	<!-- A menu bar app: no Dock icon, not in Cmd+Tab (like the Windows tray). -->
+	<key>LSUIElement</key>
+	<true/>
+	<!-- macOS 15+ asks before an app reaches the local network: LocalSend
+	     discovery, the local-network transfer path, direct links to friends. -->
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>P2P Share trouve les appareils LocalSend et échange directement avec vos amis présents sur le même réseau.</string>
+</dict>
+</plist>

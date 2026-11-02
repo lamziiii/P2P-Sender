@@ -1,14 +1,24 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { api } from './api';
-import type { LocalSendDevice, LocalSendMessage } from './api';
+import type { LocalSendDevice, LocalSendMessage, NotifySettings } from './api';
+import { ChatInput, PendingMark } from './chatParts';
+import { chatRows } from './chatRows';
+import { formatTime } from './format';
 import { Icon } from './icons';
+import { WindowButtons } from './PinButton';
+import { RichText } from './RichText';
 
 const MAX_TEXT = 5000;
 
 // The chat with a LocalSend device: text sent from its LocalSend app lands
 // here, and what is written here reaches it as a LocalSend text message.
-export function LocalSendChatView({ fingerprint, notice, onBack }: {
+export function LocalSendChatView({ fingerprint, notice, dropping, onBack, muted, onMuted }: {
+  // Its messages give no notification, and to change it.
+  muted: boolean;
+  onMuted: (settings: NotifySettings) => void;
+  // Files are dragged over the window: they go to this device.
+  dropping?: boolean;
   fingerprint: string;
   // Offers shown above the chat, as in the other views.
   notice: ReactNode[];
@@ -59,6 +69,31 @@ export function LocalSendChatView({ fingerprint, notice, onBack }: {
 
   const name = device?.alias || alias || 'Appareil LocalSend';
 
+  // Not laid out again on each key typed.
+  const rows = useMemo(() => chatRows(messages, {
+    ts: m => m.ts,
+    sender: m => (m.mine ? 'me' : 'device'),
+    key: m => m.id,
+    render: (m, { cont, last }) => (
+      <div key={m.id} className={`bubble-row ${m.mine ? 'mine' : ''} ${cont ? 'cont' : ''}`}>
+        <div className={`bubble ${m.mine ? 'mine' : 'theirs'}`}>
+          <RichText text={m.text} />
+          {(last || m.status === 'pending' || m.unverified) && (
+            <div className="bubble-time">
+              {formatTime(m.ts)}
+              {m.mine && m.status === 'pending' && <PendingMark />}
+              {m.mine && m.status === 'delivered' && <span title="Reçu par l’appareil"> ✓✓</span>}
+              {m.unverified && <span title="Ancienne version de LocalSend : rien ne prouve que ce message vient bien de cet appareil."> · non vérifié</span>}
+            </div>
+          )}
+          {m.mine && m.status === 'failed' && (
+            <div className="bubble-time" style={{ color: 'var(--danger)' }}>Non envoyé{m.error ? ` : ${m.error}` : ''}</div>
+          )}
+        </div>
+      </div>
+    ),
+  }), [messages]);
+
   const send = async () => {
     const text = input.trim();
     // Enter pressed twice before the first send returns: send once.
@@ -79,7 +114,7 @@ export function LocalSendChatView({ fingerprint, notice, onBack }: {
   };
 
   return (
-    <div className="app">
+    <div className={`app ${dropping ? 'dropping' : ''}`}>
       <div className="header">
         <div className="brand">
           <button className="icon-btn" title="Retour" onClick={onBack}><Icon name="back" /></button>
@@ -93,10 +128,19 @@ export function LocalSendChatView({ fingerprint, notice, onBack }: {
             </div>
           </div>
         </div>
-        <button className="icon-btn" title="Masquer" onClick={() => api.hideWindow()}><Icon name="close" /></button>
+        <div className="header-actions">
+          <button
+            className={`icon-btn ${muted ? 'active' : ''}`}
+            title={muted ? 'Réactiver les notifications' : 'Désactiver les notifications'}
+            onClick={async () => onMuted(await api.setChatMuted('localsend', fingerprint, !muted))}
+          >
+            <Icon name={muted ? 'bellOff' : 'bell'} />
+          </button>
+          <WindowButtons />
+        </div>
       </div>
 
-      {notice.length > 0 && <div className="content" style={{ flex: 'none' }}>{notice}</div>}
+      {notice.length > 0 && <div className="content notices">{notice}</div>}
 
       <div className="chat-messages">
         {messages.length === 0 && (
@@ -105,38 +149,18 @@ export function LocalSendChatView({ fingerprint, notice, onBack }: {
             Aucun message. Le texte envoyé depuis LocalSend sur cet appareil arrivera ici.
           </div>
         )}
-        {messages.map(m => (
-          <div key={m.id} className={`bubble-row ${m.mine ? 'mine' : ''}`}>
-            <div className={`bubble ${m.mine ? 'mine' : 'theirs'}`}>
-              {m.text}
-              <div className="bubble-time">
-                {new Date(m.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                {m.mine && m.status === 'pending' && ' · Envoi…'}
-                {m.mine && m.status === 'delivered' && <span title="Reçu par l’appareil"> ✓✓</span>}
-                {m.unverified && <span title="Ancienne version de LocalSend : rien ne prouve que ce message vient bien de cet appareil."> · non vérifié</span>}
-              </div>
-              {m.mine && m.status === 'failed' && (
-                <div className="bubble-time" style={{ color: 'var(--danger)' }}>Non envoyé{m.error ? ` : ${m.error}` : ''}</div>
-              )}
-            </div>
-          </div>
-        ))}
+        {rows}
         <div ref={endRef} />
       </div>
 
-      <div className="chat-input-row">
-        {error && <div className="chat-error">{error}</div>}
-        <input
-          className="input"
-          placeholder={device ? 'Écrire un message…' : 'Appareil introuvable : ouvrez LocalSend dessus'}
-          value={input}
-          maxLength={MAX_TEXT}
-          onChange={e => setInput(e.target.value)}
-          onKeyDown={e => e.key === 'Enter' && send()}
-          style={{ flex: 1 }}
-        />
-        <button className="btn btn-icon" title="Envoyer" onClick={send}><Icon name="send" /></button>
-      </div>
+      <ChatInput
+        value={input}
+        onChange={setInput}
+        onSend={send}
+        placeholder={device ? 'Écrire un message…' : 'Appareil introuvable : ouvrez LocalSend dessus'}
+        maxLength={MAX_TEXT}
+        error={error}
+      />
     </div>
   );
 }

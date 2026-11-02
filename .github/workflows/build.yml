@@ -2,7 +2,10 @@ name: Build/Release
 
 # Every push and pull request builds the installers (downloadable from the
 # Actions tab). A GitHub release is only published when a version tag
-# (v1.2.3) is pushed. A manual run can target some platforms only, e.g.
+# (v1.2.3) is pushed; it must match the version of package.json,
+# tauri.conf.json and Cargo.toml. A prerelease tag (v1.2.3-beta.1) is
+# published as a prerelease, not marked latest, and not sent to winget.
+# A manual run can target some platforms only, e.g.
 #   gh workflow run build.yml -f platforms='["macos-latest"]'
 on:
   workflow_dispatch:
@@ -10,6 +13,10 @@ on:
       platforms:
         description: 'Runners to build on (JSON list)'
         default: '["windows-latest", "macos-latest", "ubuntu-22.04"]'
+      android:
+        description: 'Build the Android APK too'
+        type: boolean
+        default: true
 
   push:
     branches:
@@ -22,7 +29,36 @@ permissions:
   contents: read
 
 jobs:
+  # A release tag must name the version being built.
+  version:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out git repository
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Check the tag against the app version
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          tag="${TAG#v}"
+          npm_version=$(node -p "require('./package.json').version")
+          tauri_version=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          # The first version line is the one of [package].
+          cargo_version=$(grep -m1 '^version *=' src-tauri/Cargo.toml | sed 's/^version *= *"\(.*\)".*/\1/')
+          echo "tag $tag · package.json $npm_version · tauri.conf.json $tauri_version · Cargo.toml $cargo_version"
+          status=0
+          for pair in "package.json:$npm_version" "src-tauri/tauri.conf.json:$tauri_version" "src-tauri/Cargo.toml:$cargo_version"; do
+            if [ "${pair#*:}" != "$tag" ]; then
+              echo "::error file=${pair%%:*}::version ${pair#*:} does not match the tag $TAG"
+              status=1
+            fi
+          done
+          exit $status
+
   build:
+    needs: version
     strategy:
       fail-fast: false
       matrix:
@@ -58,10 +94,85 @@ jobs:
         run: npm ci
 
       - name: Test P2P core
-        run: cargo test --lib --manifest-path src-tauri/Cargo.toml
+        run: cargo test --locked --lib --manifest-path src-tauri/Cargo.toml
+
+      # Windows release builds are signed through SignPath once its token is
+      # set (secret SIGNPATH_API_TOKEN, see "Code signing" in the README);
+      # everything else is built as before, unsigned.
+      - name: Decide on signing
+        id: sign
+        shell: bash
+        env:
+          SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
+        run: |
+          if [ "$RUNNER_OS" = Windows ] && [ -n "$SIGNPATH_API_TOKEN" ] && [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Build installers
-        run: npx tauri build
+        if: steps.sign.outputs.enabled != 'true'
+        # Arguments after -- go to cargo build.
+        run: npx tauri build -- --locked
+
+      # Signed: the app first, so that the installer carries the signed exe,
+      # then the installer itself.
+      - name: Build the app
+        if: steps.sign.outputs.enabled == 'true'
+        run: npx tauri build --no-bundle -- --locked
+
+      - name: Upload the app for signing
+        if: steps.sign.outputs.enabled == 'true'
+        id: unsigned-app
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: unsigned-app
+          path: src-tauri/target/release/p2pshare.exe
+          if-no-files-found: error
+
+      - name: Sign the app
+        if: steps.sign.outputs.enabled == 'true'
+        uses: signpath/github-action-submit-signing-request@f6d04783b4569d051e0c80105fe66e82819d0092 # v3
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
+          github-artifact-id: ${{ steps.unsigned-app.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: signed-app
+
+      - name: Bundle the installer around the signed app
+        if: steps.sign.outputs.enabled == 'true'
+        shell: bash
+        run: |
+          cp signed-app/p2pshare.exe src-tauri/target/release/p2pshare.exe
+          npx tauri bundle --bundles nsis
+
+      - name: Upload the installer for signing
+        if: steps.sign.outputs.enabled == 'true'
+        id: unsigned-installer
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: unsigned-installer
+          path: src-tauri/target/release/bundle/nsis/*.exe
+          if-no-files-found: error
+
+      - name: Sign the installer
+        if: steps.sign.outputs.enabled == 'true'
+        uses: signpath/github-action-submit-signing-request@f6d04783b4569d051e0c80105fe66e82819d0092 # v3
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
+          github-artifact-id: ${{ steps.unsigned-installer.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: signed-installer
+
+      - name: Use the signed installer
+        if: steps.sign.outputs.enabled == 'true'
+        shell: bash
+        run: cp signed-installer/*.exe src-tauri/target/release/bundle/nsis/
 
       - name: Upload installers
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
@@ -73,8 +184,82 @@ jobs:
             src-tauri/target/release/bundle/appimage/*.AppImage
           if-no-files-found: error
 
+  android:
+    needs: version
+    if: github.event_name != 'workflow_dispatch' || inputs.android
+    runs-on: ubuntu-latest
+    env:
+      NDK_VERSION: 27.3.13750724
+      # Only given to version tags: a release APK keeps one key for life, or
+      # Android refuses its updates (see "Android" in the README).
+      KEYSTORE_BASE64: ${{ startsWith(github.ref, 'refs/tags/v') && secrets.ANDROID_KEYSTORE_BASE64 || '' }}
+    steps:
+      - name: Check out git repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: 22
+          cache: 'npm'
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: src-tauri
+          key: android
+
+      - name: Set up Java and the Android NDK
+        run: |
+          echo "JAVA_HOME=$JAVA_HOME_21_X64" >> "$GITHUB_ENV"
+          manager="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$manager" --licenses > /dev/null
+          "$manager" "ndk;$NDK_VERSION" > /dev/null
+          echo "NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Set up the release key
+        if: env.KEYSTORE_BASE64 != ''
+        working-directory: src-tauri/gen/android
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          echo "$KEYSTORE_BASE64" | base64 -d > release.jks
+          {
+            echo "storeFile=release.jks"
+            echo "storePassword=$KEYSTORE_PASSWORD"
+            echo "keyAlias=$KEY_ALIAS"
+            echo "keyPassword=$KEY_PASSWORD"
+          } > keystore.properties
+
+      - name: Build the APK
+        run: |
+          chmod +x src-tauri/gen/android/gradlew
+          npx tauri android build --apk --target aarch64
+          version=$(node -p "require('./package.json').version")
+          mkdir -p apk
+          mv src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk "apk/P2PShare_${version}_android-arm64.apk"
+
+      # Signed with the debug key of this run without the release key: to
+      # try it from the Actions tab, not for a release (see publish).
+      - name: Upload the APK
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: ${{ env.KEYSTORE_BASE64 != '' && 'P2PShare-android' || 'Test-android' }}
+          path: apk/*.apk
+          if-no-files-found: error
+
   publish:
-    needs: build
+    needs: [build, android]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
@@ -84,30 +269,43 @@ jobs:
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           path: ./artifacts
+          # Not the unsigned files sent for signing, nor a test APK.
+          pattern: P2PShare-*
           merge-multiple: true
 
-      # Lets users check what they downloaded (the installers are not signed).
+      # Lets users check what they downloaded (only Windows can be signed).
       - name: Compute checksums
         run: |
           cd artifacts
-          find . -type f \( -name '*.exe' -o -name '*.dmg' -o -name '*.AppImage' \) -print0 |
+          find . -type f \( -name '*.exe' -o -name '*.dmg' -o -name '*.AppImage' -o -name '*.apk' \) -print0 |
             while IFS= read -r -d '' f; do
               echo "$(sha256sum "$f" | cut -d' ' -f1)  $(basename "$f")"
             done > SHA256SUMS.txt
           cat SHA256SUMS.txt
+
+      # The APK comes only with the release key set up.
+      - name: List the release files
+        id: files
+        run: |
+          {
+            echo 'list<<EOF'
+            echo 'artifacts/**/*.exe'
+            echo 'artifacts/**/*.dmg'
+            echo 'artifacts/**/*.AppImage'
+            if [ -n "$(find artifacts -name '*.apk')" ]; then echo 'artifacts/**/*.apk'; fi
+            echo 'artifacts/SHA256SUMS.txt'
+            echo EOF
+          } >> "$GITHUB_OUTPUT"
 
       - name: Create release
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
         with:
           name: P2PShare ${{ github.ref_name }}
           # Each installer sits in its bundle folder (nsis/, dmg/, appimage/).
-          files: |
-            artifacts/**/*.exe
-            artifacts/**/*.dmg
-            artifacts/**/*.AppImage
-            artifacts/SHA256SUMS.txt
+          files: ${{ steps.files.outputs.list }}
           fail_on_unmatched_files: true
-          make_latest: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          make_latest: ${{ !contains(github.ref_name, '-') }}
           generate_release_notes: true
           body: |
             ## Installation
@@ -117,13 +315,14 @@ jobs:
             - **Windows** : `P2PShare_*_x64-setup.exe`
             - **macOS** (Apple Silicon) : `P2PShare_*_aarch64.dmg`
             - **Linux** : `P2PShare_*_amd64.AppImage`
+            - **Android** (arm64) : `P2PShare_*_android-arm64.apk`, si présent
 
             La version 3 n'échange pas avec les versions 2.x (Electron) : vos amis doivent aussi passer à la v3. Votre ID, vos amis et vos messages sont repris automatiquement.
 
-  # Sends the new version to winget (see winget.yml).
+  # Sends the new version to winget (see winget.yml); not a prerelease.
   winget:
     needs: publish
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-')
     uses: ./.github/workflows/winget.yml
     with:
       tag: ${{ github.ref_name }}

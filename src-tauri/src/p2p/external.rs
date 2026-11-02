@@ -102,23 +102,47 @@ impl Node {
         }
 
         let mut slot = shared.writer.lock().await;
-        let Some(writer) = slot.as_mut() else {
+        if slot.is_none() {
             return Err("Transfert non accepté");
-        };
+        }
         if shared.session() != session || shared.bytes.load(Ordering::Relaxed) != 0 {
             return Err("Transfert déjà commencé");
         }
+        let large = match self.large_buffer(&mut slot).await {
+            Ok(permit) => permit,
+            Err(_) => {
+                drop(slot);
+                let error = "Écriture sur le disque impossible";
+                self.external_stop(tid, Status::Error, Some(error));
+                return Err(error);
+            }
+        };
+        let Some(writer) = slot.as_mut() else {
+            return Err("Transfert non accepté");
+        };
         let mut cancel = shared.session.subscribe();
         let mut pos = 0;
+        let mut cancelled = false;
         let failure = loop {
             let chunk = tokio::select! {
                 c = data.recv() => c,
                 // Cancelled here: already stopped by whoever cancelled it.
-                _ = session_changed(&mut cancel, session) => return Err("Transfert annulé"),
+                _ = session_changed(&mut cancel, session) => {
+                    cancelled = true;
+                    break Some("Transfert annulé");
+                }
             };
             let Some(chunk) = chunk else {
                 break Some("Transfert interrompu par l’expéditeur");
             };
+            // The speed limit holds the sender back from here.
+            tokio::select! {
+                _ = self.0.down.take(chunk.len()) => {}
+                _ = session_changed(&mut cancel, session) => {
+                    cancelled = true;
+                    break Some("Transfert annulé");
+                }
+            }
             if pos + chunk.len() as u64 > size {
                 break Some("Taille reçue incohérente");
             }
@@ -131,7 +155,20 @@ impl Node {
                 break None;
             }
         };
+        // Back to the small buffer, which writes out the large one.
+        let flushed = match large {
+            Some(_) => rebuffer(&mut slot, IDLE_BUFFER).await,
+            None => Ok(()),
+        };
+        drop(large);
         drop(slot);
+        if cancelled {
+            return Err("Transfert annulé");
+        }
+        let failure = match failure {
+            None if flushed.is_err() => Some("Écriture sur le disque impossible"),
+            failure => failure,
+        };
         match failure {
             None => {
                 self.with(|s| self.begin_finalize(s, tid));
@@ -197,6 +234,12 @@ impl Node {
             s.set_status(tid, Status::Sending, None);
             true
         })
+    }
+
+    /// Wait until `bytes` more may be sent under the speed limit (for
+    /// senders outside the P2P network, before each piece they send).
+    pub async fn throttle_upload(&self, bytes: usize) {
+        self.0.up.take(bytes).await;
     }
 
     /// The peer received the whole file.

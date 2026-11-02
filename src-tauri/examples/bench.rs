@@ -1,8 +1,11 @@
 //! Headless transfer benchmark using the app's P2P core.
 //!
 //!   bench recv <workdir>          wait for an offer, accept it, report
-//!   bench send <workdir> <file>   send <file> to the receiver, report
+//!   bench send <workdir> <file>...  send the files to the receiver, report
 //!
+//! With several files, BENCH_COUNT tells the receiver how many to wait for;
+//! the result covers all of them. A single folder is sent as a folder
+//! (BENCH_COUNT is then its number of files), which the receiver accepts.
 //! Both sides publish their ID in <workdir>/<role>.id and read the other's,
 //! so the same workdir can pair this binary with bench/electron-bench.mjs.
 //! With BENCH_NO_LAN set, the local-network fast path is off (QUIC only).
@@ -13,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use iroh::SecretKey;
 use p2pshare_lib::localsend::Identity;
-use p2pshare_lib::p2p::{Event, Messages, Node, Options, Status};
+use p2pshare_lib::p2p::{Event, Node, Options, Status};
 use p2pshare_lib::store::JsonStore;
 use tokio::sync::mpsc;
 
@@ -30,8 +33,12 @@ async fn main() {
         }
     };
     let sending = role == "send";
-    let file = args.get(2).map(PathBuf::from);
-    if sending && file.is_none() {
+    let files: Vec<PathBuf> = args.iter().skip(2).map(PathBuf::from).collect();
+    let expected = std::env::var("BENCH_COUNT")
+        .ok()
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(if sending { files.len() } else { 1 });
+    if sending && files.is_empty() {
         eprintln!("send needs a file");
         std::process::exit(2);
     }
@@ -43,10 +50,7 @@ async fn main() {
     let node = Node::start(Options {
         secret: SecretKey::generate(),
         friends: JsonStore::load(work.join(format!("{role}-v3-friends.json")), Vec::new()),
-        messages: JsonStore::load(
-            work.join(format!("{role}-v3-messages.json")),
-            Messages::new(),
-        ),
+        messages_dir: work.join(format!("{role}-v3-messages")),
         download_dir: Arc::new(move || out.clone()),
         on_event: Arc::new(move |e| {
             let _ = tx.send(e);
@@ -77,9 +81,18 @@ async fn main() {
 
     let mut transfer_start = None;
     let mut via_lan = false;
+    let mut route = None;
+    let mut done: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut total_bytes = 0u64;
     loop {
         let event = tokio::time::timeout(CONNECT_TIMEOUT, events.recv()).await;
         let Ok(Some(event)) = event else {
+            for t in node.transfers().iter().filter(|t| t.status != Status::Completed) {
+                println!(
+                    "[v3 {role}] en attente : {} {:?} {}%",
+                    t.file_name, t.status, t.progress
+                );
+            }
             println!(
                 "RESULT {{\"ok\":false,\"error\":\"pas de connexion après {}s\"}}",
                 CONNECT_TIMEOUT.as_secs()
@@ -94,25 +107,45 @@ async fn main() {
                 );
                 if sending && transfer_start.is_none() {
                     transfer_start = Some(Instant::now());
-                    node.send_files(&peer, &[file.clone().unwrap()]);
+                    if files.len() == 1 && files[0].is_dir() {
+                        node.send_folder(&peer, &files[0]).expect("folder");
+                    } else {
+                        node.send_files(&peer, &files);
+                    }
                 }
             }
             Event::FileOffer(t, _) => {
-                transfer_start = Some(Instant::now());
-                node.respond_to_offer(&t.id, true);
+                transfer_start.get_or_insert_with(Instant::now);
+                match &t.folder {
+                    Some(f) => {
+                        node.respond_to_folder(&t.friend_id, &f.id, true);
+                    }
+                    None => node.respond_to_offer(&t.id, true),
+                }
             }
             Event::Transfer(t) if t.lan && !via_lan => {
                 via_lan = true;
                 println!("[v3 {role}] via le réseau local");
             }
+            Event::Transfer(t) if t.route.is_some() && route.is_none() => {
+                route = t.route;
+                println!("[v3 {role}] chemin : {}", t.route.unwrap_or_default());
+            }
             Event::Transfer(t) if t.status == Status::Completed => {
+                if done.insert(t.id.clone()) {
+                    total_bytes += t.file_size;
+                }
+                if done.len() < expected {
+                    continue;
+                }
                 let secs = transfer_start
                     .map(|s| s.elapsed().as_secs_f64())
                     .unwrap_or(0.0);
-                let mbps = t.file_size as f64 / 1_048_576.0 / secs.max(1e-9);
+                let mbps = total_bytes as f64 / 1_048_576.0 / secs.max(1e-9);
                 println!(
-                    "RESULT {{\"ok\":true,\"role\":\"{role}\",\"bytes\":{},\"seconds\":{secs:.3},\"mb_per_s\":{mbps:.1},\"total_s\":{:.3}}}",
-                    t.file_size,
+                    "RESULT {{\"ok\":true,\"role\":\"{role}\",\"files\":{},\"bytes\":{},\"seconds\":{secs:.3},\"mb_per_s\":{mbps:.1},\"total_s\":{:.3}}}",
+                    done.len(),
+                    total_bytes,
                     started.elapsed().as_secs_f64()
                 );
                 // Let the final acks reach the peer before closing.

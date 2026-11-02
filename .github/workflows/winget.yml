@@ -1,11 +1,14 @@
 name: Winget
 
 # Sends a released version to winget: a pull request to microsoft/winget-pkgs,
-# merged after Microsoft's checks. Called by build.yml after each release, or
-# run by hand from the Actions tab for a given tag.
+# merged after Microsoft's checks. Called by build.yml after each release
+# (not for prereleases), or run by hand from the Actions tab for a given tag.
 #
-# The first version had no manifest to update: it was submitted from the
-# manifests in winget/<version>/. Later versions update the latest one.
+# Once lamzii.P2PShare is in winget-pkgs, wingetcreate updates its latest
+# manifest. Until then (the first pull request not merged yet), the version
+# is submitted from winget/<version>/ if that folder exists, otherwise from
+# manifests generated from the newest winget/<version>/ folder with the new
+# version, installer URL and SHA256.
 #
 # Needs a WINGET_TOKEN secret: a classic GitHub token with the public_repo
 # scope (wingetcreate opens the pull request from a fork in that account).
@@ -27,6 +30,11 @@ on:
 permissions:
   contents: read
 
+env:
+  # Pinned wingetcreate release, checked against its SHA256 before it runs.
+  WINGETCREATE_URL: https://github.com/microsoft/winget-create/releases/download/v1.12.13.0/wingetcreate.exe
+  WINGETCREATE_SHA256: 24042BD37915805615E6CF969AC57C6439124C3FE85823327F5F3FB24BD9FFEA
+
 jobs:
   submit:
     runs-on: windows-latest
@@ -41,30 +49,79 @@ jobs:
           TAG: ${{ inputs.tag }}
           REPO: ${{ github.repository }}
         run: |
+          $ErrorActionPreference = 'Stop'
           if (-not $env:WINGET_TOKEN) {
             Write-Output "::notice::WINGET_TOKEN is not set: winget not updated"
             exit 0
           }
+          # Prereleases (v1.2.3-beta.1) do not go to winget.
           if ($env:TAG -notmatch '^v\d+\.\d+\.\d+$') {
-            Write-Output "::error::Not a version tag: $env:TAG"
+            Write-Output "::error::Not a release version tag: $env:TAG"
             exit 1
           }
           $version = $env:TAG.Substring(1)
-          Invoke-WebRequest https://aka.ms/wingetcreate/latest -OutFile wingetcreate.exe
-          $headers = @{ Authorization = "Bearer $env:WINGET_TOKEN" }
+          $url = "https://github.com/$env:REPO/releases/download/$env:TAG/P2PShare_${version}_x64-setup.exe"
+
+          Invoke-WebRequest $env:WINGETCREATE_URL -OutFile wingetcreate.exe
+          $hash = (Get-FileHash wingetcreate.exe -Algorithm SHA256).Hash
+          if ($hash -ne $env:WINGETCREATE_SHA256) {
+            Write-Output "::error::wingetcreate.exe SHA256 $hash, expected $env:WINGETCREATE_SHA256"
+            exit 1
+          }
+
+          # Is the package in winget-pkgs yet? Only a 404 means no; any other
+          # error stops here rather than submitting a wrong pull request.
+          $headers = @{ Authorization = "Bearer $env:WINGET_TOKEN"; 'X-GitHub-Api-Version' = '2022-11-28' }
           $listed = $true
           try {
             Invoke-RestMethod -Headers $headers https://api.github.com/repos/microsoft/winget-pkgs/contents/manifests/l/lamzii/P2PShare | Out-Null
           } catch {
-            $listed = $false
+            $status = $_.Exception.Response.StatusCode
+            if ($status -and [int]$status -eq 404) {
+              $listed = $false
+            } else {
+              Write-Output "::error::Could not check winget-pkgs for lamzii.P2PShare: $($_.Exception.Message)"
+              exit 1
+            }
           }
+
           if ($listed) {
-            $url = "https://github.com/$env:REPO/releases/download/$env:TAG/P2PShare_${version}_x64-setup.exe"
             ./wingetcreate.exe update lamzii.P2PShare --version $version --urls $url --token $env:WINGET_TOKEN --submit
-          } elseif (Test-Path "winget/$version") {
-            ./wingetcreate.exe submit --token $env:WINGET_TOKEN --prtitle "New package: lamzii.P2PShare version $version" "winget/$version"
-          } else {
-            Write-Output "::error::lamzii.P2PShare is not on winget yet (or its first pull request is not merged), and winget/$version has no manifests to submit"
-            exit 1
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            exit 0
           }
+
+          $dir = "winget/$version"
+          if (-not (Test-Path $dir)) {
+            # Generate this version's manifests from the newest ones in winget/.
+            $template = Get-ChildItem winget -Directory |
+              Where-Object { $_.Name -match '^\d+\.\d+\.\d+$' } |
+              Sort-Object { [version]$_.Name } |
+              Select-Object -Last 1
+            if (-not $template) {
+              Write-Output "::error::lamzii.P2PShare is not on winget yet and winget/ has no manifests to start from"
+              exit 1
+            }
+            $old = $template.Name
+            Write-Output "Generating $dir from winget/$old"
+            Invoke-WebRequest $url -OutFile installer.exe
+            $sha = (Get-FileHash installer.exe -Algorithm SHA256).Hash
+            $date = Get-Date -Format 'yyyy-MM-dd'
+            $dir = "$env:RUNNER_TEMP/winget/$version"
+            New-Item -ItemType Directory -Force $dir | Out-Null
+            foreach ($file in Get-ChildItem $template.FullName -Filter *.yaml) {
+              $text = (Get-Content $file.FullName -Raw).Replace("/tag/v$old", "/tag/$env:TAG")
+              $text = $text -replace '(?m)^PackageVersion:.*$', "PackageVersion: $version"
+              $text = $text -replace '(?m)^(\s*InstallerUrl:).*$', "`$1 $url"
+              $text = $text -replace '(?m)^(\s*InstallerSha256:).*$', "`$1 $sha"
+              $text = $text -replace '(?m)^(ReleaseDate:).*$', "`$1 $date"
+              Set-Content -Path (Join-Path $dir $file.Name) -Value $text -Encoding utf8NoBOM -NoNewline
+            }
+            Get-ChildItem $dir | ForEach-Object { Write-Output "== $($_.Name)"; Get-Content $_.FullName }
+            if (-not (Select-String -Path "$dir/*.installer.yaml" -SimpleMatch $url -Quiet)) {
+              Write-Output "::error::The generated installer manifest does not point to $url"
+              exit 1
+            }
+          }
+          ./wingetcreate.exe submit --token $env:WINGET_TOKEN --prtitle "New package: lamzii.P2PShare version $version" $dir
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

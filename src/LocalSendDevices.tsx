@@ -8,7 +8,9 @@ const SCAN_TIME = 3000;
 
 // Devices running LocalSend on the same network, to send files and text to,
 // and the devices we have chatted with that are not around right now.
-export function LocalSendDevices({ onSent, onOpenChat }: {
+export function LocalSendDevices({ dropTarget, onSent, onOpenChat }: {
+  // The device files dragged over the window would go to.
+  dropTarget: string | null;
   onSent: () => void;
   onOpenChat: (fingerprint: string) => void;
 }) {
@@ -69,7 +71,7 @@ export function LocalSendDevices({ onSent, onOpenChat }: {
   return (
     <>
       <div className="section-header section-header-row">
-        <span>Appareils LocalSend{devices.length > 0 ? ` (${devices.length})` : ''}</span>
+        <span>À proximité (LocalSend){devices.length > 0 ? ` · ${devices.length}` : ''}</span>
         <button className="icon-btn small" title="Rechercher à nouveau" disabled={scanning} onClick={scan}>
           <Icon name="sync" size={14} />
         </button>
@@ -77,7 +79,13 @@ export function LocalSendDevices({ onSent, onOpenChat }: {
       {devices.length > 0 && (
         <div className="list">
           {devices.map(d => (
-            <div key={d.fingerprint} className="list-item">
+            <div
+              key={d.fingerprint}
+              className={`list-item ${dropTarget === d.fingerprint ? 'drop-target' : ''}`}
+              data-drop-kind="localsend"
+              data-drop-id={d.fingerprint}
+              data-drop-name={d.alias}
+            >
               <div className="avatar"><Icon name={d.deviceType === 'mobile' ? 'phone' : 'monitor'} /></div>
               <div className="item-body">
                 <div className="item-title">{d.alias}</div>

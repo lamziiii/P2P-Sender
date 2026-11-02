@@ -1,95 +1,229 @@
-import { useState, useEffect, useRef } from 'react';
+import { useCallback, useState, useEffect, useRef } from 'react';
+import type { ReactNode } from 'react';
 import { api } from './api';
-import type { ChatMessage, Config, Friend, GroupsOverview, OpenChat, Transfer } from './api';
-import { formatBytes } from './format';
+import type { ChatMessage, Config, DropTarget, Friend, GroupsOverview, OpenChat, Transfer } from './api';
+import { DndButton } from './Dnd';
+import { FINAL, folderErrors, folderSendError, formatBytes, plural, RELAY_HINT, ROUTE_LABELS } from './format';
+import { FriendChatView } from './FriendChat';
+import { FriendsTab } from './FriendsTab';
+import type { Unread } from './FriendsTab';
 import { GroupsTab, GroupView } from './Groups';
 import { Icon } from './icons';
+import { WindowButtons } from './PinButton';
 import { LocalSendChatView } from './LocalSendChat';
-import { LocalSendDevices } from './LocalSendDevices';
-import { LocalSendSettings } from './LocalSendSettings';
-import { RelaySettings } from './RelaySettings';
+import { isMobile, useBackButton } from './platform';
+import { useRelayStatus } from './relay';
+import { SettingsTab } from './SettingsTab';
+import type { Theme } from './SettingsTab';
+import { TransfersTab } from './TransfersTab';
+import { transferStore, useOffers, useRunning, useTransfers } from './transferStore';
+import { Welcome } from './Welcome';
 
-const ACTIVE = new Set(['sending', 'receiving']);
-const FINAL = new Set(['completed', 'declined', 'cancelled', 'error']);
+// Shown in the chat with a preview (same list as the backend's).
+const IMAGE_EXT = /\.(jpe?g|png|gif|webp|bmp)$/i;
+// How long the relay may take to answer at start before the network counts as blocked.
+const CONNECT_GRACE = 15_000;
+// Longest last message shown in the friend list (as the backend cuts it).
+const PREVIEW_CHARS = 120;
+// How long "typing" shows without news from the friend.
+const TYPING_SHOWN = 5000;
+// Transfer updates shown together within that many ms.
+const UPDATE_BATCH = 100;
 
-const ADD_FRIEND_ERRORS: Record<string, string> = {
-  invalid_id: 'ID invalide : il doit faire 64 caractères (0-9, a-f).',
-  self: 'C’est votre propre ID.',
-  no_name: 'Indiquez un pseudo.',
-};
+type Connection = 'connecting' | 'online' | 'blocked';
 
-const formatSpeed = (bps: number) => (bps > 0 ? `${formatBytes(bps)}/s` : '');
+// Whether we reach the network: through the relay, which every connection
+// between friends starts with.
+function useConnection(): Connection {
+  const status = useRelayStatus();
+  const [late, setLate] = useState(false);
+  useEffect(() => {
+    const grace = setTimeout(() => setLate(true), CONNECT_GRACE);
+    return () => clearTimeout(grace);
+  }, []);
+  if (status?.connected) return 'online';
+  return late || status?.error ? 'blocked' : 'connecting';
+}
 
-const formatEta = (t: Transfer) => {
-  if (!ACTIVE.has(t.status) || t.speed <= 0) return '';
-  const s = Math.round((t.fileSize - t.bytes) / t.speed);
-  if (s < 60) return `${s} s`;
-  if (s < 3600) return `${Math.floor(s / 60)} min ${s % 60} s`;
-  return `${Math.floor(s / 3600)} h ${Math.floor((s % 3600) / 60)} min`;
-};
+// Running transfers, seen from every tab but their own. Renders on its own
+// when their progress changes.
+function TransferStrip({ onOpen }: { onOpen: () => void }) {
+  const { count, active, progress, route } = useRunning();
+  if (count === 0) return null;
+  return (
+    <button className="transfer-strip list-button" title={route === 'relay' ? `Voir les transferts. ${RELAY_HINT}` : 'Voir les transferts'} onClick={onOpen}>
+      <span>
+        {plural(count, 'transfert en cours', 'transferts en cours')}{active ? ` · ${progress} %` : ''}
+        {active && route ? ` · ${ROUTE_LABELS[route]}` : ''}
+      </span>
+      <div className="progress-track"><div className="progress-fill" style={{ width: `${progress}%`, background: 'var(--accent)' }} /></div>
+    </button>
+  );
+}
 
-const transferColor = (status: string) => {
-  if (status === 'completed') return 'var(--success)';
-  if (status === 'declined' || status === 'cancelled' || status === 'error') return 'var(--danger)';
-  if (ACTIVE.has(status)) return 'var(--accent)';
-  return 'var(--text-secondary)';
-};
+function RunningBadge() {
+  const { count } = useRunning();
+  return count > 0 ? <span className="badge">{count}</span> : null;
+}
 
-const transferLabel = (t: Transfer) => {
-  switch (t.status) {
-    case 'completed': return 'Terminé';
-    case 'declined': return 'Refusé';
-    case 'cancelled': return 'Annulé';
-    case 'error': return 'Erreur';
-    case 'connecting': return 'Connexion P2P…';
-    case 'waiting_consent': return 'En attente d’acceptation…';
-    case 'paused': return 'Reconnexion…';
-    case 'finishing': return 'Finalisation…';
-    default: return `${t.progress}%`;
-  }
-};
+// The removed friend's transfers that would be cancelled.
+function RemovedTransfers({ friendId }: { friendId: string }) {
+  const n = useTransfers().filter(t => t.friendId === friendId && !FINAL.has(t.status)).length;
+  return n > 0 ? <> {plural(n, 'transfert en cours sera annulé', 'transferts en cours seront annulés')}.</> : null;
+}
+
+// A chat's last message, as the friend list shows it.
+const withLastMessage = (f: Friend, m: ChatMessage, myId: string): Friend => ({
+  ...f,
+  lastText: m.file ? 'Image' : Array.from(m.text).slice(0, PREVIEW_CHARS).join(''),
+  lastTs: m.ts,
+  lastMine: m.from === myId,
+});
 
 function App() {
   const [activeTab, setActiveTab] = useState('friends');
   const [friends, setFriends] = useState<Friend[]>([]);
   const [myId, setMyId] = useState('Chargement...');
-  const [newFriendId, setNewFriendId] = useState('');
-  const [newFriendName, setNewFriendName] = useState('');
-  const [addError, setAddError] = useState('');
-  const [transfers, setTransfers] = useState<Transfer[]>([]);
   const [config, setConfig] = useState<Partial<Config>>({});
   const [chatFriendId, setChatFriendId] = useState<string | null>(null);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
-  const [chatInput, setChatInput] = useState('');
-  const [chatError, setChatError] = useState('');
+  // Friends typing to us right now.
+  const [typing, setTyping] = useState<Record<string, true>>({});
+  const typingTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
   const [overview, setOverview] = useState<GroupsOverview>({ groups: [], invites: [] });
   const [groupId, setGroupId] = useState<string | null>(null);
   const [nickname, setNickname] = useState('');
   const [lsChat, setLsChat] = useState<string | null>(null);
-  const [theme, setTheme] = useState<'light' | 'dark'>(
-    () => (localStorage.getItem('theme') as 'light' | 'dark') ?? 'dark'
+  // Friend messages received while their chat was not open, by friend.
+  const [unread, setUnread] = useState<Unread>({});
+  // First launch: the welcome comes before everything else.
+  const [welcome, setWelcome] = useState(false);
+  // Friend whose removal waits for confirmation.
+  const [removing, setRemoving] = useState<Friend | null>(null);
+  // Files dragged over the window, and where they would go.
+  const [dragging, setDragging] = useState(false);
+  const [dropTarget, setDropTarget] = useState<DropTarget | null>(null);
+  const [toast, setToast] = useState('');
+  // Settings opened from the network warning show the advanced part.
+  const [settingsAdvanced, setSettingsAdvanced] = useState(false);
+  const toastTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  // What the event handlers need of the current view.
+  const viewRef = useRef({ tab: 'friends', chat: null as string | null, group: null as string | null, ls: null as string | null });
+  const [theme, setTheme] = useState<Theme>(
+    () => (localStorage.getItem('theme') as Theme | null) ?? 'system'
   );
-  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const connection = useConnection();
+  // Mobile: the back button leaves the chats, groups and settings.
+  useBackButton(!welcome && ['chat', 'group', 'localsend', 'settings'].includes(activeTab));
   const chatFriendIdRef = useRef<string | null>(null);
-  const chatErrorTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
-  const sendingRef = useRef(false);
+  // Delivery statuses that came before their message was shown, by message id.
+  const earlyStatus = useRef(new Map<string, ChatMessage['status']>());
+  // Only the latest answer of a burst of group reloads is applied.
+  const groupsLoadId = useRef(0);
+  // For the event handlers: our ID once known, and the friends shown.
+  const myIdRef = useRef<string | null>(null);
+  const friendsRef = useRef(friends);
+  const overviewRef = useRef(overview);
 
   const chatFriend = friends.find(f => f.id === chatFriendId) ?? null;
-  const offers = transfers.filter(t => t.dir === 'in' && t.status === 'pending');
-  // Several files from one sender are answered together.
+  const offers = useOffers();
+  // Several files from one sender are answered together, a folder's apart.
   const offerGroups = Object.values(offers.reduce<Record<string, Transfer[]>>((groups, t) => {
-    (groups[t.friendId] ??= []).push(t);
+    (groups[t.folder ? `${t.friendId}/${t.folder.id}` : t.friendId] ??= []).push(t);
     return groups;
   }, {}));
-  const transferList = transfers.filter(t => t.status !== 'pending');
-  const groupBadge = overview.invites.length + overview.groups.reduce((n, g) => n + g.unread, 0);
-  const runningCount = transferList.filter(t => !FINAL.has(t.status)).length;
+  const friendBadge = Object.values(unread).reduce((n, u) => n + u.count, 0);
+  // Muted groups count only their mentions.
+  const groupBadge = overview.invites.length
+    + overview.groups.reduce((n, g) => n + (g.muted ? g.unreadMentions : g.unread), 0);
   const friendName = (id: string) => friends.find(f => f.id === id)?.name;
   const senderName = (t: Transfer) => friendName(t.friendId) ?? t.peerName;
+  const transferName = useCallback(
+    (t: Transfer) => friends.find(f => f.id === t.friendId)?.name ?? t.peerName ?? 'votre ami',
+    [friends],
+  );
+  // Paused by hand: with friends only (not LocalSend devices).
+  const pausable = useCallback(
+    (t: Transfer) => !t.peerName && !t.group && friends.some(f => f.id === t.friendId),
+    [friends],
+  );
+  useEffect(() => { friendsRef.current = friends; }, [friends]);
+  useEffect(() => { overviewRef.current = overview; }, [overview]);
 
   useEffect(() => {
-    document.documentElement.setAttribute('data-theme', theme === 'dark' ? 'dark' : '');
+    // Leaving the chat: its friend's next messages count as unread.
+    if (activeTab !== 'chat') chatFriendIdRef.current = null;
+    viewRef.current = {
+      tab: activeTab,
+      chat: activeTab === 'chat' ? chatFriendId : null,
+      group: activeTab === 'group' ? groupId : null,
+      ls: activeTab === 'localsend' ? lsChat : null,
+    };
+  }, [activeTab, chatFriendId, groupId, lsChat]);
+
+  const withEarlyStatus = (m: ChatMessage): ChatMessage => {
+    const status = earlyStatus.current.get(m.id);
+    if (status === undefined) return m;
+    earlyStatus.current.delete(m.id);
+    return { ...m, status };
+  };
+
+  const showToast = useCallback((text: string) => {
+    setToast(text);
+    clearTimeout(toastTimer.current);
+    toastTimer.current = setTimeout(() => setToast(''), 4000);
+  }, []);
+
+  // The open chat is seen: the friend gets "Vu" (if both show it).
+  const markRead = () => {
+    const friendId = chatFriendIdRef.current;
+    if (friendId && document.hasFocus()) api.markChatRead(friendId);
+  };
+
+  const stopTyping = (friendId: string) => {
+    clearTimeout(typingTimers.current.get(friendId));
+    typingTimers.current.delete(friendId);
+    setTyping(prev => {
+      if (!prev[friendId]) return prev;
+      const next = { ...prev };
+      delete next[friendId];
+      return next;
+    });
+  };
+
+  // Our reactions, as the backend kept them.
+  const setReactions = useCallback((id: string, reactions: Record<string, string>) => {
+    setChatMessages(prev => prev.map(m => (m.id === id ? { ...m, reactions } : m)));
+  }, []);
+
+  const loadGroups = () => {
+    const id = ++groupsLoadId.current;
+    return api.getGroups().then(o => { if (id === groupsLoadId.current) setOverview(o); });
+  };
+
+  const loadFriends = () => { api.getFriends().then(setFriends); };
+
+  // A message came or went: its friend's last message, without asking the
+  // whole list again (unless the friend or our ID is not known yet).
+  const showLastMessage = (friendId: string, message: ChatMessage) => {
+    const me = myIdRef.current;
+    if (me === null || !friendsRef.current.some(f => f.id === friendId)) {
+      loadFriends();
+      return;
+    }
+    setFriends(prev => prev.map(f => (f.id === friendId ? withLastMessage(f, message, me) : f)));
+  };
+
+  useEffect(() => {
+    const media = matchMedia('(prefers-color-scheme: dark)');
+    const apply = () => {
+      const dark = theme === 'dark' || (theme === 'system' && media.matches);
+      document.documentElement.setAttribute('data-theme', dark ? 'dark' : '');
+    };
+    apply();
     localStorage.setItem('theme', theme);
+    media.addEventListener('change', apply);
+    return () => media.removeEventListener('change', apply);
   }, [theme]);
 
   const openChatWith = async (friendId: string) => {
@@ -97,14 +231,21 @@ function App() {
     setChatFriendId(friendId);
     setChatMessages([]);
     setActiveTab('chat');
+    setUnread(prev => {
+      const next = { ...prev };
+      delete next[friendId];
+      return next;
+    });
+    earlyStatus.current.clear();
     const history = await api.getMessages(friendId);
     // Another chat may have been opened meanwhile.
     if (chatFriendIdRef.current !== friendId) return;
     // Keep what arrived while loading.
     setChatMessages(prev => {
       const known = new Set(history.map(m => m.id));
-      return [...history, ...prev.filter(m => !known.has(m.id))];
+      return [...history, ...prev.filter(m => !known.has(m.id))].map(m => withEarlyStatus(m));
     });
+    markRead();
   };
 
   const openGroup = (gid: string) => {
@@ -125,222 +266,443 @@ function App() {
     else if (target) openChatWith(target.id);
   };
 
+  const openSettings = (advanced: boolean) => {
+    setSettingsAdvanced(advanced);
+    setActiveTab('settings');
+  };
+
+  // Files and folders dropped on a friend, a group or a LocalSend device.
+  const dropPaths = async (target: DropTarget, paths: string[]) => {
+    const inView = viewRef.current.tab !== 'friends' && viewRef.current.tab !== 'groups';
+    if (target.kind === 'friend') {
+      const { sent, skipped, errors } = await api.sendPaths(target.id, paths);
+      if (errors.length > 0) showToast(folderErrors(errors));
+      else if (skipped > 0) showToast(`${plural(skipped, 'élément introuvable ignoré', 'éléments introuvables ignorés')}.`);
+      if (sent === 0) return;
+      if (!inView) setActiveTab('transfers');
+      // In the chat, only the images show.
+      else if (errors.length === 0 && skipped === 0 && !paths.every(path => IMAGE_EXT.test(path))) {
+        showToast(`${plural(sent, 'fichier envoyé', 'fichiers envoyés')} : suivez l’envoi dans l’onglet Transferts.`);
+      }
+    } else if (target.kind === 'group') {
+      const added = await api.addGroupPaths(target.id, paths).catch(() => 0);
+      showToast(added > 0
+        ? `${plural(added, 'fichier ajouté', 'fichiers ajoutés')} au dépôt de « ${target.name || 'ce groupe'} ».`
+        : 'Aucun fichier ajouté au groupe.');
+    } else {
+      try {
+        const { sent, skipped } = await api.sendPathsToLocalSend(target.id, paths);
+        if (skipped > 0) {
+          showToast(sent > 0
+            ? `${plural(skipped, 'dossier ignoré', 'dossiers ignorés')} : un appareil LocalSend ne reçoit d’ici que des fichiers.`
+            : 'Un appareil LocalSend ne reçoit d’ici que des fichiers, pas de dossiers.');
+        }
+        if (sent === 0) return;
+        if (!inView) setActiveTab('transfers');
+        else if (skipped === 0) showToast(`${plural(sent, 'fichier envoyé', 'fichiers envoyés')} : suivez l’envoi dans l’onglet Transferts.`);
+      } catch (e) {
+        showToast(String(e));
+      }
+    }
+  };
+
   useEffect(() => {
-    api.getMyId().then(setMyId);
-    api.getFriends().then(setFriends);
-    api.getConfig().then(c => { setConfig(c); setNickname(c.nickname); });
-    const loadGroups = () => api.getGroups().then(setOverview);
+    api.getMyId().then(id => {
+      myIdRef.current = id;
+      setMyId(id);
+    });
+    loadFriends();
+    api.getConfig().then(c => {
+      setConfig(c);
+      setNickname(c.nickname);
+      setWelcome(!c.welcomed);
+    });
     loadGroups();
-    api.getTransfers().then(list => setTransfers(prev => {
+    api.getTransfers().then(list => transferStore.update(prev => {
       const known = new Set(prev.map(t => t.id));
       return [...prev, ...list.filter(t => !known.has(t.id))];
     }));
 
+    // A folder of small files brings hundreds of updates a second: they are
+    // applied together, newest first as one by one.
+    const updates = new Map<string, Transfer>();
+    let flushTimer: ReturnType<typeof setTimeout> | undefined;
+    const flushUpdates = () => {
+      flushTimer = undefined;
+      const batch = [...updates.values()];
+      updates.clear();
+      transferStore.update(prev => {
+        const index = new Map(prev.map((t, i) => [t.id, i]));
+        const next = [...prev];
+        const added: Transfer[] = [];
+        for (const t of batch) {
+          const i = index.get(t.id);
+          if (i === undefined) added.unshift(t);
+          else next[i] = t;
+        }
+        return [...added, ...next];
+      });
+    };
+
     const unsubscribers = [
       api.onTransferUpdate(data => {
-        setTransfers(prev => {
-          const idx = prev.findIndex(t => t.id === data.id);
-          if (idx === -1) return [data, ...prev];
-          const next = [...prev];
-          next[idx] = data;
-          return next;
-        });
+        updates.set(data.id, data);
+        flushTimer ??= setTimeout(flushUpdates, UPDATE_BATCH);
       }),
       api.onNewMessage(({ friendId, message }) => {
-        if (chatFriendIdRef.current === friendId) setChatMessages(prev => [...prev, message]);
+        // The list shows each chat's last message.
+        showLastMessage(friendId, message);
+        if (message.from === friendId) stopTyping(friendId);
+        if (chatFriendIdRef.current === friendId) {
+          setChatMessages(prev => (prev.some(m => m.id === message.id) ? prev : [...prev, message]));
+          if (message.from === friendId) markRead();
+          return;
+        }
+        // An image comes with its own offer banner.
+        if (message.file) return;
+        // No system notification while the window has the focus: shown here.
+        setUnread(prev => ({ ...prev, [friendId]: { count: (prev[friendId]?.count ?? 0) + 1, last: message.text } }));
       }),
       api.onMessageStatus(({ friendId, id, status }) => {
         if (chatFriendIdRef.current !== friendId) return;
-        setChatMessages(prev => prev.map(m => (m.id === id ? { ...m, status } : m)));
+        setChatMessages(prev => {
+          // A late "delivered" does not undo "read".
+          if (prev.some(m => m.id === id)) return prev.map(m => (m.id === id && m.status !== 'read' ? { ...m, status } : m));
+          // Our message is not shown yet (send_message has not returned): applied when it is.
+          earlyStatus.current.set(id, status);
+          return prev;
+        });
       }),
-      api.onOpenChat(openFromOutside),
+      api.onMessagesRead(({ friendId, ids }) => {
+        if (chatFriendIdRef.current !== friendId) return;
+        setChatMessages(prev => {
+          const shown = new Set(prev.map(m => m.id));
+          ids.filter(id => !shown.has(id)).forEach(id => earlyStatus.current.set(id, 'read'));
+          const read = new Set(ids);
+          return prev.map(m => (read.has(m.id) ? { ...m, status: 'read' } : m));
+        });
+      }),
+      api.onMessageReactions(({ friendId, id, reactions }) => {
+        if (chatFriendIdRef.current === friendId) setReactions(id, reactions);
+      }),
+      api.onFriendTyping(({ friendId }) => {
+        clearTimeout(typingTimers.current.get(friendId));
+        typingTimers.current.set(friendId, setTimeout(() => stopTyping(friendId), TYPING_SHOWN));
+        setTyping(prev => (prev[friendId] ? prev : { ...prev, [friendId]: true }));
+      }),
+      api.onDndChanged(({ dndUntil }) => setConfig(c => ({ ...c, dndUntil }))),
+      // The payload is used only when the backend kept nothing for take_open_chat.
+      api.onOpenChat(
+        target => { api.takeOpenChat().then(pending => openFromOutside(pending ?? target)); },
+        // Asked once listening, so that a request made while loading is not lost.
+        () => { api.takeOpenChat().then(openFromOutside); },
+      ),
       api.onGroupUpdate(loadGroups),
+      api.onFriendsChanged(loadFriends),
+      api.onDragDrop(e => {
+        if (e.type === 'leave') {
+          setDragging(false);
+          setDropTarget(null);
+          return;
+        }
+        const { tab, chat, group, ls } = viewRef.current;
+        // From another tab of the main view, the friends come to the files.
+        if (['transfers', 'settings'].includes(tab)) setActiveTab('friends');
+        let target: DropTarget | null;
+        if (chat) target = { kind: 'friend', id: chat, name: friendsRef.current.find(f => f.id === chat)?.name ?? '' };
+        else if (group) target = { kind: 'group', id: group, name: overviewRef.current.groups.find(g => g.id === group)?.name ?? '' };
+        else if (ls) target = { kind: 'localsend', id: ls, name: '' };
+        else {
+          const el = document
+            .elementFromPoint(e.x / devicePixelRatio, e.y / devicePixelRatio)
+            ?.closest<HTMLElement>('[data-drop-kind]');
+          target = el ? { kind: el.dataset.dropKind as DropTarget['kind'], id: el.dataset.dropId!, name: el.dataset.dropName ?? '' } : null;
+        }
+        if (e.type !== 'drop') {
+          setDragging(true);
+          // Same place: the same object, not a render per mouse move.
+          setDropTarget(prev => (prev?.kind === target?.kind && prev?.id === target?.id ? prev : target));
+          return;
+        }
+        setDragging(false);
+        setDropTarget(null);
+        if (!target) {
+          showToast(tab === 'groups'
+            ? 'Déposez les fichiers sur un groupe pour les ajouter à son dépôt.'
+            : 'Déposez les fichiers sur un ami ou un appareil pour les lui envoyer.');
+          return;
+        }
+        dropPaths(target, e.paths);
+      }),
       api.onFriendStatus(({ friendId, online }) => {
         setFriends(prev => prev.map(f => (f.id === friendId ? { ...f, online } : f)));
         loadGroups();
       }),
     ];
-    api.takeOpenChat().then(openFromOutside);
+
+    // Escape goes back, or hides the window from the main view. Dialogs and
+    // menus close themselves first.
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape' || document.querySelector('.modal-backdrop, .menu-popover, .reaction-picker')) return;
+      const { tab } = viewRef.current;
+      if (tab === 'chat' || tab === 'localsend' || tab === 'settings') setActiveTab('friends');
+      else if (tab === 'group') {
+        setActiveTab('groups');
+        loadGroups();
+      } else if (!isMobile) api.hideWindow();
+    };
+    window.addEventListener('keydown', onKey);
+    // Back to the window: the open chat is seen.
+    window.addEventListener('focus', markRead);
+    const timers = typingTimers.current;
+
     return () => {
       unsubscribers.forEach(unsubscribe => unsubscribe());
-      clearTimeout(chatErrorTimer.current);
+      clearTimeout(flushTimer);
+      window.removeEventListener('keydown', onKey);
+      window.removeEventListener('focus', markRead);
+      clearTimeout(toastTimer.current);
+      timers.forEach(clearTimeout);
     };
     // Subscribed once: the handlers only use state setters and refs.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [chatMessages]);
+    if (!removing) return;
+    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && setRemoving(null);
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [removing]);
 
-  const showChatError = (text: string) => {
-    setChatError(text);
-    clearTimeout(chatErrorTimer.current);
-    chatErrorTimer.current = setTimeout(() => setChatError(''), 3000);
+  // Our message, sent from the chat.
+  const onSent = (friendId: string, entry: ChatMessage) => {
+    if (chatFriendIdRef.current === friendId) setChatMessages(prev => [...prev, withEarlyStatus(entry)]);
+    showLastMessage(friendId, entry);
   };
 
-  const sendChatMessage = async () => {
-    const text = chatInput.trim();
-    const friendId = chatFriendId;
-    // Enter pressed twice before the first send returns: send once.
-    if (!text || !friendId || sendingRef.current) return;
-    sendingRef.current = true;
-    setChatInput('');
-    try {
-      const entry = await api.sendMessage(friendId, text);
-      if ('error' in entry) {
-        setChatInput(text);
-        showChatError(entry.error === 'too_long' ? 'Message trop long (5000 caractères max).' : 'Message non envoyé.');
-        return;
-      }
-      if (chatFriendIdRef.current === friendId) setChatMessages(prev => [...prev, entry]);
-    } finally {
-      sendingRef.current = false;
-    }
-  };
-
-  const addFriend = async () => {
-    if (!newFriendId.trim() || !newFriendName.trim()) return;
-    const res = await api.addFriend(newFriendId, newFriendName);
-    if ('error' in res) {
-      setAddError(ADD_FRIEND_ERRORS[res.error] ?? 'Impossible d’ajouter cet ami.');
-      return;
-    }
-    setAddError('');
-    setFriends(res.friends);
-    setNewFriendId('');
-    setNewFriendName('');
-  };
-
-  const removeFriend = async (id: string, e: React.MouseEvent) => {
-    e.stopPropagation();
+  const removeFriend = async (id: string) => {
+    setRemoving(null);
     setFriends(await api.removeFriend(id));
   };
 
+  // From the friend list: the transfers show where it goes.
   const sendFile = async (friendId: string) => {
     const count = await api.selectAndSendFile(friendId);
     if (count > 0) setActiveTab('transfers');
   };
 
-  const clearFinished = () => {
-    api.clearFinished();
-    setTransfers(prev => prev.filter(t => !FINAL.has(t.status)));
+  const sendFolder = async (friendId: string) => {
+    const res = await api.sendFolder(friendId);
+    if ('error' in res) showToast(folderSendError(res.error));
+    else if (res.sent > 0) setActiveTab('transfers');
   };
 
-  const onlineCount = friends.filter(f => f.online).length;
-  const onlineLabel = onlineCount === 0 ? 'Aucun ami en ligne' : `${onlineCount} ami${onlineCount > 1 ? 's' : ''} en ligne`;
+  const clearFinished = () => {
+    api.clearFinished();
+    transferStore.update(prev => prev.filter(t => !FINAL.has(t.status)));
+  };
 
-  // Shown in every view: an offer must not wait unseen behind a chat.
-  const offerBanners = offerGroups.map(group => {
+  // An offer's answer; the full card (in the sender's chat) or one line
+  // elsewhere. A folder's files are answered together.
+  const offerView = (group: Transfer[], compact: boolean) => {
     const [first] = group;
+    const folder = first.folder;
     const respond = (accept: boolean) => {
-      group.forEach(t => api.respondToFileOffer(t.id, accept));
-      if (accept) setActiveTab('transfers');
+      if (folder) api.respondToFolder(first.friendId, folder.id, accept);
+      else group.forEach(t => api.respondToFileOffer(t.id, accept));
+      // In a chat, the download goes on there (the strip shows it).
+      if (accept && viewRef.current.tab !== 'chat') setActiveTab('transfers');
     };
+    const many = folder !== undefined || group.length > 1;
     const risky = group.some(t => t.executable);
+    const size = formatBytes(folder ? folder.size : group.reduce((n, t) => n + t.fileSize, 0));
+    const who = senderName(first) ?? 'Un ami';
+    const what = folder ? `le dossier « ${folder.name} »` : group.length > 1 ? `${group.length} fichiers` : `« ${first.fileName} »`;
+    const fromFriend = !first.peerName && friends.some(f => f.id === first.friendId);
+    const acceptLabel = many ? 'Tout accepter' : 'Accepter';
+    const declineLabel = many ? 'Tout refuser' : 'Refuser';
+    if (compact) {
+      return (
+        <div key={first.id} className="offer-banner compact">
+          <div className="file-icon"><Icon name={risky ? 'alert' : folder ? 'folder' : 'file'} size={16} /></div>
+          <button
+            className="item-body list-button offer-line"
+            disabled={!fromFriend}
+            title={fromFriend ? 'Ouvrir la discussion' : undefined}
+            onClick={() => openChatWith(first.friendId)}
+          >
+            <div className="offer-title ellipsis">{who} vous envoie {what}</div>
+            <div className={`item-sub ellipsis ${risky ? 'danger' : ''}`}>
+              {folder ? `${plural(folder.files, 'fichier', 'fichiers')} · ` : ''}{size}
+              {first.peerName ? ' · LocalSend, non vérifié' : ''}{risky ? ' · peut exécuter du code' : ''}
+            </div>
+          </button>
+          <button className="btn btn-small" onClick={() => respond(true)}>{folder ? acceptLabel : 'Accepter'}</button>
+          <button className="btn btn-secondary btn-small" onClick={() => respond(false)}>{folder ? declineLabel : 'Refuser'}</button>
+        </div>
+      );
+    }
     return (
       <div key={first.id} className="offer-banner">
-        <div className="file-icon"><Icon name="file" size={18} /></div>
+        <div className="file-icon"><Icon name={folder ? 'folder' : 'file'} size={18} /></div>
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div className="offer-title">{group.length > 1 ? `${group.length} fichiers entrants` : 'Fichier entrant'}</div>
+          <div className="offer-title">{folder ? 'Dossier entrant' : group.length > 1 ? `${group.length} fichiers entrants` : 'Fichier entrant'}</div>
           <div className="offer-desc">
-            <strong>{senderName(first) ?? 'Un ami'}</strong>{first.peerName ? ' (LocalSend, identité non vérifiée)' : ''} vous envoie{' '}
-            {group.length > 1
-              ? <>{group.slice(0, 3).map(t => `"${t.fileName}"`).join(', ')}{group.length > 3 ? ` et ${group.length - 3} autres` : ''}</>
-              : <strong>"{first.fileName}"</strong>}{' '}
-            ({formatBytes(group.reduce((n, t) => n + t.fileSize, 0))})
+            {folder
+              ? <><strong>« {folder.name} »</strong> ({plural(folder.files, 'fichier', 'fichiers')}, {size})</>
+              : group.length > 1
+                ? <>{group.slice(0, 3).map(t => `« ${t.fileName} »`).join(', ')}{group.length > 3 ? ` et ${group.length - 3} autres` : ''} ({size})</>
+                : <><strong>« {first.fileName} »</strong> ({size})</>}
           </div>
           {risky && (
             <div className="error-text" style={{ marginBottom: 8 }}>
-              Attention : {group.length > 1 ? 'certains fichiers peuvent' : 'ce fichier peut'} exécuter du code. Ne l’ouvrez que si vous attendiez cet envoi.
+              Attention : {folder ? 'ce dossier contient des fichiers qui peuvent' : group.length > 1 ? 'certains fichiers peuvent' : 'ce fichier peut'} exécuter du code{folder ? ', reçus aussi si vous acceptez' : ''}. Ne les ouvrez que si vous attendiez cet envoi.
             </div>
           )}
           <div style={{ display: 'flex', gap: 8 }}>
-            <button className="btn" style={{ flex: 1 }} onClick={() => respond(true)}>{group.length > 1 ? 'Tout accepter' : 'Accepter'}</button>
-            <button className="btn btn-secondary" style={{ flex: 1 }} onClick={() => respond(false)}>{group.length > 1 ? 'Tout refuser' : 'Refuser'}</button>
+            <button className="btn" style={{ flex: 1 }} onClick={() => respond(true)}>{acceptLabel}</button>
+            <button className="btn btn-secondary" style={{ flex: 1 }} onClick={() => respond(false)}>{declineLabel}</button>
           </div>
         </div>
       </div>
     );
-  });
+  };
+
+  // Friend messages not read yet, shown in the views without the friend list.
+  const messageBanners = Object.entries(unread).map(([id, u]) => (
+    // openChatWith only runs on click, not during render.
+    // eslint-disable-next-line react-hooks/refs
+    <button key={`msg-${id}`} className="offer-banner compact list-button" onClick={() => openChatWith(id)}>
+      <div className="file-icon"><Icon name="chat" size={16} /></div>
+      <div className="item-body">
+        <div className="offer-title ellipsis">
+          {u.count > 1 ? `${u.count} nouveaux messages` : 'Nouveau message'} de {friendName(id) ?? 'un ami'}
+        </div>
+        <div className="item-sub ellipsis">{u.last}</div>
+      </div>
+    </button>
+  ));
+  const offerBanners = offerGroups.map(group => offerView(group, true));
+  const notices = [...offerBanners, ...messageBanners];
+
+  const transferStrip = <TransferStrip onOpen={() => setActiveTab('transfers')} />;
+
+  const dropHint = () => {
+    if (dropTarget?.kind === 'group') return `Déposer pour ajouter au dépôt de « ${dropTarget.name || 'ce groupe'} »`;
+    if (dropTarget) return `Déposer pour envoyer à ${dropTarget.name || 'cet appareil'}`;
+    return activeTab === 'groups'
+      ? 'Déposez les fichiers ou dossiers sur un groupe'
+      : 'Déposez les fichiers ou dossiers sur un ami ou un appareil';
+  };
+  // Over every view: they are fixed on the window.
+  const overlays = (
+    <>
+      {dragging && <div className={`drop-hint ${dropTarget ? 'ready' : ''}`}>{dropHint()}</div>}
+      {toast && !dragging && <div className="toast">{toast}</div>}
+      {removing && (
+        <div className="modal-backdrop" onClick={() => setRemoving(null)}>
+          <div className="modal" role="dialog" aria-modal="true" onClick={e => e.stopPropagation()}>
+            <div className="modal-title">Supprimer {removing.name} ?</div>
+            <div className="modal-text">
+              Vous ne pourrez plus discuter ni échanger de fichiers avec cet ami. Pour le retrouver, il faudra ajouter à nouveau son ID.
+              <RemovedTransfers friendId={removing.id} />
+            </div>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button className="btn btn-secondary" style={{ flex: 1 }} autoFocus onClick={() => setRemoving(null)}>Annuler</button>
+              <button className="btn btn-danger" style={{ flex: 1 }} onClick={() => removeFriend(removing.id)}>Supprimer</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
+  );
+  const withOverlays = (view: ReactNode) => <>{view}{overlays}</>;
+
+  /* ─── First launch ─── */
+  if (welcome) {
+    return (
+      <Welcome
+        myId={myId}
+        nickname={nickname}
+        onNickname={saved => { setNickname(saved); setConfig(c => ({ ...c, nickname: saved })); }}
+        onDone={() => { setWelcome(false); setConfig(c => ({ ...c, welcomed: true })); }}
+      />
+    );
+  }
 
   /* ─── Group View ─── */
   if (activeTab === 'group' && groupId) {
-    return <GroupView key={groupId} gid={groupId} friends={friends} transfers={transfers} notice={offerBanners} onBack={() => setActiveTab('groups')} />;
+    return withOverlays(
+      <GroupView
+        key={groupId}
+        gid={groupId}
+        friends={friends}
+        notice={notices}
+        dropping={dragging}
+        onChange={loadGroups}
+        onBack={() => { setActiveTab('groups'); loadGroups(); }}
+      />
+    );
   }
 
   /* ─── LocalSend Chat View ─── */
   if (activeTab === 'localsend' && lsChat) {
-    return <LocalSendChatView key={lsChat} fingerprint={lsChat} notice={offerBanners} onBack={() => setActiveTab('friends')} />;
+    return withOverlays(
+      <LocalSendChatView
+        key={lsChat}
+        fingerprint={lsChat}
+        notice={notices}
+        dropping={dragging}
+        onBack={() => setActiveTab('friends')}
+        muted={config.notifications?.mutedLocalsend.includes(lsChat) ?? false}
+        onMuted={notifications => setConfig(c => ({ ...c, notifications }))}
+      />
+    );
   }
 
+  // The open chat's friend is gone (removed): back to the friend list.
+  const tab = activeTab === 'chat' && !chatFriend ? 'friends' : activeTab;
+
   /* ─── Chat View ─── */
-  if (activeTab === 'chat' && chatFriend) {
-    return (
-      <div className="app">
-        <div className="header">
-          <div className="brand">
-            <button className="icon-btn" title="Retour" onClick={() => setActiveTab('friends')}><Icon name="back" /></button>
-            <div className="avatar small">{chatFriend.name[0]?.toUpperCase()}</div>
-            <div className="header-title">
-              <div className="title">{chatFriend.name}</div>
-              <div className={`subtitle ${chatFriend.online ? 'online' : ''}`}>
-                {chatFriend.online ? 'En ligne · chiffré de bout en bout' : 'Hors ligne · envoi à sa reconnexion'}
-              </div>
-            </div>
-          </div>
-          <button className="icon-btn" title="Masquer" onClick={() => api.hideWindow()}><Icon name="close" /></button>
-        </div>
-
-        {offerBanners.length > 0 && <div className="content" style={{ flex: 'none' }}>{offerBanners}</div>}
-
-        <div className="chat-messages">
-          {chatMessages.length === 0 && (
-            <div className="empty-state">
-              <Icon name="chat" size={32} />
-              Aucun message. Dites bonjour !
-            </div>
-          )}
-          {chatMessages.map(m => {
-            const mine = m.from === myId;
-            return (
-              <div key={m.id} className={`bubble-row ${mine ? 'mine' : ''}`}>
-                <div className={`bubble ${mine ? 'mine' : 'theirs'}`}>
-                  {m.text}
-                  <div className="bubble-time">
-                    {new Date(m.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                    {mine && (
-                      <span title={m.status === 'pending' ? 'En attente de livraison' : 'Livré'}>
-                        {m.status === 'pending' ? ' · En attente' : ' ✓✓'}
-                      </span>
-                    )}
-                  </div>
-                </div>
-              </div>
-            );
-          })}
-          <div ref={messagesEndRef} />
-        </div>
-
-        <div className="chat-input-row">
-          {chatError && <div className="chat-error">{chatError}</div>}
-          <input
-            className="input"
-            placeholder="Écrire un message…"
-            value={chatInput}
-            maxLength={5000}
-            onChange={e => setChatInput(e.target.value)}
-            onKeyDown={e => e.key === 'Enter' && sendChatMessage()}
-            style={{ flex: 1 }}
-          />
-          <button className="btn btn-icon" title="Envoyer" onClick={sendChatMessage}><Icon name="send" /></button>
-        </div>
-      </div>
+  if (tab === 'chat' && chatFriend) {
+    // This friend's offers are answered in the conversation; images in
+    // their own bubble (not those of a folder).
+    const own = offerGroups.filter(g => g[0].friendId === chatFriend.id);
+    const otherNotices = [
+      ...offerGroups.filter(g => g[0].friendId !== chatFriend.id).map(g => offerView(g, true)),
+      ...messageBanners,
+    ];
+    const inlineOffers = own
+      .map(g => (g[0].folder ? g : g.filter(t => !IMAGE_EXT.test(t.fileName))))
+      .filter(g => g.length > 0);
+    const friendId = chatFriend.id;
+    return withOverlays(
+      <FriendChatView
+        key={friendId}
+        friend={chatFriend}
+        myId={myId}
+        messages={chatMessages}
+        typing={!!typing[friendId]}
+        notices={otherNotices}
+        offers={inlineOffers.map(g => offerView(g, false))}
+        strip={transferStrip}
+        dropping={dragging}
+        onBack={() => setActiveTab('friends')}
+        onSent={entry => onSent(friendId, entry)}
+        onReactions={setReactions}
+        onToast={showToast}
+      />
     );
   }
 
   /* ─── Main View ─── */
-  return (
+  const status = {
+    online: { label: 'Connecté', className: 'online' },
+    connecting: { label: 'Connexion au réseau…', className: '' },
+    blocked: { label: 'Réseau bloqué : relais injoignable', className: 'danger' },
+  }[connection];
+  return withOverlays(
     <div className="app">
       {/* Header */}
       <div className="header">
@@ -348,244 +710,89 @@ function App() {
           <div className="brand-icon"><Icon name="sync" size={18} /></div>
           <div className="header-title">
             <div className="title">P2P Share</div>
-            <div className="subtitle">{onlineLabel}</div>
+            {connection === 'blocked'
+              ? (
+                <button className={`subtitle status-line link-title ${status.className}`} title="Ouvrir les réglages réseau" onClick={() => openSettings(true)}>
+                  <Icon name="alert" size={11} /> {status.label}
+                </button>
+              )
+              : (
+                <div className={`subtitle status-line ${status.className}`}>
+                  <span className={`status-dot ${connection}`} /> {status.label}
+                </div>
+              )}
           </div>
         </div>
         <div className="header-actions">
-          <button className={`icon-btn ${activeTab === 'settings' ? 'active' : ''}`} title="Paramètres" onClick={() => setActiveTab('settings')}><Icon name="settings" /></button>
-          <button className="icon-btn" title="Masquer" onClick={() => api.hideWindow()}><Icon name="close" /></button>
+          <DndButton until={config.dndUntil ?? 0} onChange={dndUntil => setConfig(c => ({ ...c, dndUntil }))} />
+          <button className={`icon-btn ${tab === 'settings' ? 'active' : ''}`} title="Paramètres" onClick={() => openSettings(false)}><Icon name="settings" /></button>
+          <WindowButtons />
         </div>
       </div>
+      {tab !== 'transfers' && tab !== 'settings' && transferStrip}
 
       {/* Nav */}
-      {activeTab !== 'settings' && (
+      {tab !== 'settings' && (
         <div className="pivot">
-          <button className={`pivot-btn ${activeTab === 'friends' ? 'active' : ''}`} onClick={() => setActiveTab('friends')}>
-            Amis
+          <button className={`pivot-btn ${tab === 'friends' ? 'active' : ''}`} onClick={() => setActiveTab('friends')}>
+            Amis{friendBadge > 0 && <span className="badge">{friendBadge}</span>}
           </button>
-          <button className={`pivot-btn ${activeTab === 'groups' ? 'active' : ''}`} onClick={() => setActiveTab('groups')}>
+          <button className={`pivot-btn ${tab === 'groups' ? 'active' : ''}`} onClick={() => setActiveTab('groups')}>
             Groupes{groupBadge > 0 && <span className="badge">{groupBadge}</span>}
           </button>
-          <button className={`pivot-btn ${activeTab === 'transfers' ? 'active' : ''}`} onClick={() => setActiveTab('transfers')}>
-            Transferts{runningCount > 0 && <span className="badge">{runningCount}</span>}
+          <button className={`pivot-btn ${tab === 'transfers' ? 'active' : ''}`} onClick={() => setActiveTab('transfers')}>
+            Transferts<RunningBadge />
           </button>
         </div>
       )}
 
       <div className="content">
+        {tab !== 'settings' && offerBanners}
+        {tab !== 'friends' && tab !== 'settings' && messageBanners}
 
-        {/* ── File Offer Banners ── */}
-        {offerBanners}
-
-        {/* ── Friends Tab ── */}
-        {activeTab === 'friends' && (
-          <>
-            {/* My ID */}
-            <div className="card id-box">
-              <div style={{ minWidth: 0 }}>
-                <div className="card-label">Mon ID</div>
-                <div className="id-value">{myId}</div>
-              </div>
-              <button className="btn btn-secondary btn-small" onClick={() => navigator.clipboard.writeText(myId)}><Icon name="copy" size={14} />Copier</button>
-            </div>
-
-            {/* Friend List */}
-            {friends.length > 0 && <div className="section-header">Amis ({friends.length})</div>}
-            {friends.length > 0 && (
-              <div className="list">
-                {friends.map(f => (
-                  <div key={f.id} className="list-item">
-                    <div className="avatar">{f.name[0]?.toUpperCase()}</div>
-                    <div className="item-body">
-                      <div className="item-title">{f.name}</div>
-                      {f.legacy ? (
-                        <div className="item-sub danger" title="Cet ID vient d’une ancienne version. Demandez son nouvel ID et ajoutez-le à nouveau.">
-                          ID obsolète
-                        </div>
-                      ) : (
-                        <div className={`item-sub ${f.online ? 'online' : ''}`}>
-                          {f.online ? 'En ligne' : 'Hors ligne'}
-                        </div>
-                      )}
-                    </div>
-                    <div className="item-actions">
-                      <button className="icon-btn" title="Chat" disabled={f.legacy} onClick={() => openChatWith(f.id)}><Icon name="chat" /></button>
-                      <button className="icon-btn" title="Envoyer des fichiers" disabled={f.legacy} onClick={() => sendFile(f.id)}><Icon name="fileUp" /></button>
-                      <button className="icon-btn danger" title="Supprimer" onClick={(e) => removeFriend(f.id, e)}><Icon name="trash" /></button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-            {friends.length === 0 && (
-              <div className="empty-state">
-                <Icon name="users" size={32} />
-                Aucun ami. Ajoutez quelqu'un ci-dessous.
-              </div>
-            )}
-
-            {config.localsend && <LocalSendDevices onSent={() => setActiveTab('transfers')} onOpenChat={openLocalSendChat} />}
-
-            {/* Add Friend */}
-            <div className="section-header" style={{ marginTop: 6 }}>Ajouter un ami</div>
-            <input className="input" placeholder="ID de l'ami (64 caractères)" value={newFriendId} onChange={e => { setNewFriendId(e.target.value); setAddError(''); }} />
-            <input className="input" placeholder="Pseudo (ex: Alice)" value={newFriendName} onChange={e => setNewFriendName(e.target.value)} onKeyDown={e => e.key === 'Enter' && addFriend()} />
-            {addError && <div className="error-text">{addError}</div>}
-            <button className="btn" style={{ width: '100%' }} onClick={addFriend}><Icon name="plus" size={14} />Ajouter cet ami</button>
-          </>
+        {tab === 'friends' && (
+          <FriendsTab
+            friends={friends}
+            unread={unread}
+            dropTarget={dropTarget}
+            myId={myId}
+            localsend={config.localsend ?? false}
+            onFriends={setFriends}
+            onOpenChat={openChatWith}
+            onSendFile={sendFile}
+            onSendFolder={sendFolder}
+            onRemove={setRemoving}
+            onLocalSendSent={() => setActiveTab('transfers')}
+            onOpenLocalSendChat={openLocalSendChat}
+            mutedFriends={config.notifications?.mutedFriends ?? []}
+            onMuted={notifications => setConfig(c => ({ ...c, notifications }))}
+          />
         )}
 
-        {/* ── Groups Tab ── */}
-        {activeTab === 'groups' && <GroupsTab overview={overview} friends={friends} onOpen={openGroup} />}
-
-        {/* ── Transfers Tab ── */}
-        {activeTab === 'transfers' && (
-          <>
-            {transferList.length === 0 && (
-              <div className="empty-state">
-                <Icon name="transfers" size={32} />
-                Aucun transfert en cours.
-              </div>
-            )}
-            {transferList.length > runningCount && (
-              <button className="btn-link" onClick={clearFinished}>Effacer les transferts terminés</button>
-            )}
-            {transferList.length > 0 && (
-              <div className="list">
-                {transferList.map(t => (
-                  <div key={t.id} className="list-item transfer-item">
-                    <div className="file-icon"><Icon name="file" size={18} /></div>
-                    <div className="item-body">
-                      <div className="transfer-header">
-                        <span className="item-title transfer-name" title={t.fileName}>{t.fileName}</span>
-                        <span className="transfer-status" style={{ color: transferColor(t.status) }}>
-                          {transferLabel(t)}
-                        </span>
-                      </div>
-                      <div className="progress-track">
-                        <div
-                          className="progress-fill"
-                          style={{
-                            width: `${FINAL.has(t.status) && t.status !== 'completed' ? 100 : t.progress}%`,
-                            background: t.status === 'completed' ? 'var(--success)' : FINAL.has(t.status) ? 'var(--danger)' : 'var(--accent)'
-                          }}
-                        />
-                      </div>
-                      <div className="transfer-meta">
-                        <span className="transfer-dir">
-                          <Icon name={t.dir === 'out' ? 'up' : 'down'} size={12} />
-                          {t.dir === 'out' ? 'Envoi' : 'Réception'}
-                          {senderName(t) ? ` · ${senderName(t)}${t.peerName ? ' (LocalSend)' : ''}` : ''}
-                          {' · '}
-                          {ACTIVE.has(t.status) || t.status === 'paused' ? `${formatBytes(t.bytes)} / ` : ''}{formatBytes(t.fileSize)}
-                        </span>
-                        {ACTIVE.has(t.status) && t.speed > 0 && (
-                          <span style={{ whiteSpace: 'nowrap' }}>
-                            {t.lan ? 'Réseau local · ' : ''}{formatSpeed(t.speed)} · {formatEta(t)}
-                          </span>
-                        )}
-                      </div>
-                      {t.error && <div className="error-text" style={{ marginTop: 4 }}>{t.error}</div>}
-                      {(!FINAL.has(t.status) || (t.status === 'completed' && t.dir === 'in')) && (
-                        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 6, marginTop: 8 }}>
-                          {t.status === 'completed' && t.dir === 'in' && (
-                            <button className="btn btn-secondary btn-small" onClick={() => api.showInFolder(t.id)}><Icon name="folder" size={14} />Afficher</button>
-                          )}
-                          {!FINAL.has(t.status) && (
-                            <button className="btn btn-secondary btn-small" onClick={() => api.cancelTransfer(t.id)}>Annuler</button>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </>
+        {tab === 'groups' && (
+          <GroupsTab
+            overview={overview}
+            friends={friends}
+            dropTarget={dropTarget?.kind === 'group' ? dropTarget.id : null}
+            onOpen={openGroup}
+          />
         )}
 
-        {/* ── Settings Tab ── */}
-        {activeTab === 'settings' && (
-          <>
-            <div className="page-title">
-              <button className="icon-btn" title="Retour" onClick={() => setActiveTab('friends')}><Icon name="back" /></button>
-              <span>Paramètres</span>
-            </div>
+        {tab === 'transfers' && (
+          <TransfersTab nameOf={transferName} pausable={pausable} onClear={clearFinished} />
+        )}
 
-            <div className="card">
-              <div className="card-label">Mon pseudo</div>
-              <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                <input className="input" maxLength={40} placeholder="Nom affiché dans les groupes" value={nickname} onChange={e => setNickname(e.target.value)} />
-                <button className="btn btn-secondary btn-small" style={{ height: 34 }} disabled={!nickname.trim() || nickname.trim() === config.nickname} onClick={async () => {
-                  const saved = await api.setNickname(nickname);
-                  setNickname(saved);
-                  setConfig(c => ({ ...c, nickname: saved }));
-                }}>Enregistrer</button>
-              </div>
-              <div className="setting-sub" style={{ marginTop: 6 }}>Vu par les membres de vos groupes qui ne sont pas vos amis.</div>
-            </div>
-
-            <div className="card">
-              <div className="card-label">Dossier de téléchargement</div>
-              <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                <div className="path-box" title={config.downloadPath}>{config.downloadPath || 'Dossier système'}</div>
-                <button className="btn btn-secondary btn-small" onClick={async () => {
-                  const p = await api.selectDownloadDir();
-                  if (p) setConfig(c => ({ ...c, downloadPath: p }));
-                }}>Changer</button>
-              </div>
-            </div>
-
-            <LocalSendSettings
-              enabled={config.localsend ?? false}
-              nickname={config.nickname}
-              onChange={localsend => setConfig(c => ({ ...c, localsend }))}
-            />
-
-            <RelaySettings config={config} />
-
-            <div className="card">
-              <div className="setting-row">
-                <div>
-                  <div className="setting-label">Lancement au démarrage</div>
-                  <div className="setting-sub">Démarrer automatiquement avec l’ordinateur</div>
-                </div>
-                <label className="toggle">
-                  <input
-                    type="checkbox"
-                    checked={config.autoLaunch ?? true}
-                    onChange={async (e) => {
-                      const val = await api.setAutoLaunch(e.target.checked);
-                      setConfig(c => ({ ...c, autoLaunch: val }));
-                    }}
-                  />
-                  <span className="toggle-track" />
-                </label>
-              </div>
-            </div>
-
-            <div className="card">
-              <div className="setting-row">
-                <div>
-                  <div className="setting-label">Mode sombre</div>
-                  <div className="setting-sub">Thème foncé / thème clair</div>
-                </div>
-                <label className="toggle">
-                  <input
-                    type="checkbox"
-                    checked={theme === 'dark'}
-                    onChange={e => setTheme(e.target.checked ? 'dark' : 'light')}
-                  />
-                  <span className="toggle-track" />
-                </label>
-              </div>
-            </div>
-
-            <div className="card">
-              <div className="card-label">Mon identifiant P2P</div>
-              <div className="id-full">{myId}</div>
-            </div>
-          </>
+        {tab === 'settings' && (
+          <SettingsTab
+            key={settingsAdvanced ? 'advanced' : 'simple'}
+            config={config}
+            setConfig={setConfig}
+            myId={myId}
+            theme={theme}
+            setTheme={setTheme}
+            advancedOpen={settingsAdvanced}
+            onBack={() => setActiveTab('friends')}
+          />
         )}
       </div>
     </div>

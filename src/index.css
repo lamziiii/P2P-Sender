@@ -1,20 +1,23 @@
 /* Look inspired by the Windows 11 OneDrive flyout (Fluent design). */
 
 /* ─── Light Theme ─── */
+/* OneDrive's colors: Microsoft blue (#0078d4) on the Windows 11 grays. */
 :root {
   --bg: #f3f3f3;
   --surface: #ffffff;
-  --surface-hover: #f6f6f6;
+  --surface-hover: #f5f5f5;
   --surface-pressed: #ebebeb;
   --border: rgba(0, 0, 0, 0.08);
   --border-strong: rgba(0, 0, 0, 0.16);
   --text: #1b1b1b;
-  --text-secondary: #5f5f5f;
-  --accent: #0067c0;
-  --accent-hover: #1975c5;
+  --text-secondary: #616161;
+  /* Fills (buttons, badges, our bubbles), and blue text or icons. */
+  --accent: #0078d4;
+  --accent-hover: #106ebe;
+  --accent-fg: #0078d4;
   --accent-text: #ffffff;
-  --accent-soft: rgba(0, 103, 192, 0.10);
-  --success: #0f7b0f;
+  --accent-soft: rgba(0, 120, 212, 0.10);
+  --success: #107c10;
   --danger: #c42b1c;
   --danger-soft: rgba(196, 43, 28, 0.10);
   --progress-track: rgba(0, 0, 0, 0.10);
@@ -22,26 +25,28 @@
   --bubble-bg: #ffffff;
 }
 
-/* ─── Dark Theme (black) ─── */
+/* ─── Dark Theme (OneDrive's gray) ─── */
 [data-theme="dark"] {
-  --bg: #000000;
-  --surface: #141414;
-  --surface-hover: #1e1e1e;
-  --surface-pressed: #262626;
-  --border: rgba(255, 255, 255, 0.08);
-  --border-strong: rgba(255, 255, 255, 0.16);
+  --bg: #202020;
+  --surface: #2b2b2b;
+  --surface-hover: #323232;
+  --surface-pressed: #3a3a3a;
+  --border: rgba(255, 255, 255, 0.07);
+  --border-strong: rgba(255, 255, 255, 0.14);
   --text: #ffffff;
-  --text-secondary: #a8a8a8;
-  --accent: #4cc2ff;
-  --accent-hover: #47b1e8;
-  --accent-text: #000000;
-  --accent-soft: rgba(76, 194, 255, 0.12);
+  --text-secondary: #c5c5c5;
+  --accent: #0078d4;
+  --accent-hover: #1a86d9;
+  /* Microsoft blue is too dark for text on gray: its light tint. */
+  --accent-fg: #4ba0e8;
+  --accent-text: #ffffff;
+  --accent-soft: rgba(75, 160, 232, 0.14);
   --success: #6ccb5f;
   --danger: #ff99a4;
   --danger-soft: rgba(255, 153, 164, 0.12);
   --progress-track: rgba(255, 255, 255, 0.14);
-  --input-bg: #0f0f0f;
-  --bubble-bg: #1c1c1c;
+  --input-bg: #1f1f1f;
+  --bubble-bg: #2b2b2b;
 }
 
 /* ─── Reset ─── */
@@ -114,7 +119,7 @@ svg {
   height: 32px;
   border-radius: 6px;
   background: var(--accent-soft);
-  color: var(--accent);
+  color: var(--accent-fg);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -176,7 +181,7 @@ svg {
 }
 
 .icon-btn.active {
-  color: var(--accent);
+  color: var(--accent-fg);
   background: var(--accent-soft);
 }
 
@@ -404,7 +409,7 @@ svg {
   height: 32px;
   border-radius: 50%;
   background: var(--accent-soft);
-  color: var(--accent);
+  color: var(--accent-fg);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -424,7 +429,7 @@ svg {
   height: 32px;
   border-radius: 6px;
   background: var(--accent-soft);
-  color: var(--accent);
+  color: var(--accent-fg);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -490,7 +495,7 @@ svg {
   align-self: flex-end;
   border: none;
   background: none;
-  color: var(--accent);
+  color: var(--accent-fg);
   font-size: 12px;
   cursor: pointer;
   padding: 2px;
@@ -515,7 +520,7 @@ svg {
 }
 
 .input:focus {
-  border-bottom-color: var(--accent);
+  border-bottom-color: var(--accent-fg);
 }
 
 .input::placeholder {
@@ -628,10 +633,13 @@ svg {
 
 .bubble-row {
   display: flex;
+  align-items: center;
+  gap: 4px;
 }
 
+/* Ours on the right, their actions on the left of the bubble. */
 .bubble-row.mine {
-  justify-content: flex-end;
+  flex-direction: row-reverse;
 }
 
 .bubble {
@@ -744,7 +752,7 @@ svg {
 
 .toggle input:checked + .toggle-track {
   background: var(--accent);
-  border-color: var(--accent);
+  border-color: var(--accent-fg);
 }
 
 .toggle input:checked + .toggle-track::before {
@@ -800,7 +808,7 @@ svg {
 }
 
 .check-row input {
-  accent-color: var(--accent);
+  accent-color: var(--accent-fg);
   width: 16px;
   height: 16px;
   flex-shrink: 0;
@@ -855,7 +863,7 @@ svg {
 .bubble-author {
   font-size: 11px;
   font-weight: 600;
-  color: var(--accent);
+  color: var(--accent-fg);
   margin-bottom: 2px;
 }
 
@@ -873,6 +881,1135 @@ svg {
 /* Keyboard focus, in the theme's colors */
 button:focus-visible,
 .check-row:focus-within {
-  outline: 2px solid var(--accent);
+  outline: 2px solid var(--accent-fg);
   outline-offset: -2px;
+}
+
+/* ─── Links in chats ─── */
+.chat-link {
+  color: var(--accent-fg);
+  text-decoration: underline;
+  cursor: pointer;
+  word-break: break-all;
+}
+
+.bubble.mine .chat-link {
+  color: inherit;
+}
+
+/* ─── Images in chats ─── */
+.image-bubble {
+  padding: 4px;
+}
+
+.image-bubble .bubble-time {
+  padding: 0 6px 2px;
+}
+
+.chat-image {
+  display: block;
+  max-width: 100%;
+  max-height: 260px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.image-placeholder {
+  min-width: 180px;
+  padding: 8px;
+  border-radius: 6px;
+  background: var(--surface-hover);
+  color: var(--text);
+  font-size: 12px;
+}
+
+/* ─── Drag and drop ─── */
+.list-item.drop-target {
+  background: var(--accent-soft);
+  box-shadow: inset 0 0 0 2px var(--accent);
+}
+
+.app.dropping .chat-messages {
+  box-shadow: inset 0 0 0 2px var(--accent);
+  background: var(--accent-soft);
+}
+
+.drop-hint,
+.toast {
+  position: fixed;
+  left: 16px;
+  right: 16px;
+  bottom: 16px;
+  z-index: 20;
+  padding: 9px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 12px;
+  text-align: center;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+  pointer-events: none;
+}
+
+.drop-hint.ready {
+  background: var(--accent);
+  border-color: var(--accent-fg);
+  color: var(--accent-text);
+  font-weight: 600;
+}
+
+/* ─── Confirmation dialog ─── */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: rgba(0, 0, 0, 0.45);
+}
+
+.modal {
+  width: 100%;
+  padding: 16px;
+  border-radius: 8px;
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.35);
+}
+
+.modal-title {
+  font-size: 15px;
+  font-weight: 600;
+  margin-bottom: 8px;
+  word-break: break-word;
+}
+
+.modal-text {
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--text-secondary);
+  margin-bottom: 14px;
+}
+
+/* ─── First launch ─── */
+.welcome {
+  justify-content: center;
+}
+
+.welcome-title {
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.welcome-text {
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
+.welcome-dots {
+  display: flex;
+  justify-content: center;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.welcome-dots span {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--border-strong);
+}
+
+.welcome-dots span.active {
+  background: var(--accent);
+}
+
+/* ─── Friend list ─── */
+.avatar {
+  position: relative;
+}
+
+.presence {
+  position: absolute;
+  right: -1px;
+  bottom: -1px;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--success);
+  border: 2px solid var(--surface);
+}
+
+.list-row {
+  cursor: pointer;
+}
+
+.row-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.item-title.unread,
+.item-sub.unread {
+  font-weight: 600;
+  color: var(--text);
+}
+
+.menu-anchor {
+  position: relative;
+}
+
+.menu-popover {
+  position: fixed;
+  z-index: 10;
+  min-width: 150px;
+  max-width: 290px;
+  padding: 4px;
+  border-radius: 6px;
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
+}
+
+.menu-popover button {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.menu-popover button:hover {
+  background: var(--surface-hover);
+}
+
+.menu-popover button.danger {
+  color: var(--danger);
+}
+
+.search-box {
+  position: relative;
+  display: flex;
+  align-items: center;
+  color: var(--text-secondary);
+}
+
+.search-box svg {
+  position: absolute;
+  left: 10px;
+}
+
+.search-box .input {
+  padding-left: 30px;
+}
+
+.id-box-inline {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+/* ─── Header status and running transfers ─── */
+.status-line {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.subtitle.danger {
+  color: var(--danger);
+}
+
+.status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-secondary);
+  flex-shrink: 0;
+}
+
+.status-dot.online {
+  background: var(--success);
+}
+
+.status-dot.connecting {
+  animation: pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  50% { opacity: 0.3; }
+}
+
+.link-title {
+  border: none;
+  background: none;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.link-title:hover {
+  text-decoration: underline;
+}
+
+.transfer-strip {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 16px 8px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  border-top: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.transfer-strip:hover {
+  background: var(--surface-hover);
+}
+
+/* ─── Chats ─── */
+.day-divider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 8px 0 4px;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.day-divider::before,
+.day-divider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
+
+.bubble-row.cont {
+  margin-top: -3px;
+}
+
+.pending-mark {
+  display: inline-flex;
+  vertical-align: -2px;
+  margin-left: 4px;
+}
+
+.chat-input-row {
+  align-items: flex-end;
+}
+
+.chat-textarea {
+  flex: 1;
+  height: 36px;
+  min-height: 36px;
+  padding: 8px 10px;
+  line-height: 18px;
+  resize: none;
+  font-family: inherit;
+}
+
+.icon-btn.attach {
+  height: 36px;
+  color: var(--text-secondary);
+}
+
+.content.notices {
+  flex: none;
+}
+
+.offer-banner.compact {
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+}
+
+.offer-banner.compact .file-icon {
+  width: 28px;
+  height: 28px;
+}
+
+.offer-banner.compact .offer-title {
+  font-size: 12px;
+  margin-bottom: 0;
+}
+
+.offer-line {
+  padding: 0;
+  min-width: 0;
+}
+
+.offer-line:disabled {
+  cursor: default;
+}
+
+/* ─── Transfers ─── */
+.row-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.transfer-group {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0;
+}
+
+.group-head {
+  display: flex;
+  gap: 12px;
+  padding: 0;
+}
+
+.list.nested {
+  margin-top: 8px;
+}
+
+.transfer-name.link-title {
+  color: var(--accent-fg);
+  font-weight: 500;
+}
+
+/* ─── Settings ─── */
+.segmented {
+  display: flex;
+  padding: 2px;
+  gap: 2px;
+  border-radius: 6px;
+  background: var(--surface-pressed);
+}
+
+.segmented button {
+  flex: 1;
+  height: 28px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.segmented button.active {
+  background: var(--surface);
+  color: var(--text);
+  font-weight: 600;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.15);
+}
+
+.section-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 2px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.section-toggle .setting-sub {
+  font-weight: 400;
+  margin-left: 4px;
+}
+
+.saved-mark {
+  color: var(--success);
+}
+
+/* ─── Messages: actions, replies, reactions ─── */
+.bubble-stack {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  max-width: 78%;
+  min-width: 0;
+}
+
+.bubble-row.mine .bubble-stack {
+  align-items: flex-end;
+}
+
+.bubble-stack > .bubble {
+  max-width: 100%;
+}
+
+.bubble-actions {
+  position: relative;
+  display: flex;
+  gap: 2px;
+  opacity: 0;
+  transition: opacity 0.1s;
+}
+
+.bubble-row:hover .bubble-actions,
+.bubble-actions.open,
+.bubble-actions:focus-within {
+  opacity: 1;
+}
+
+.bubble-actions .icon-btn {
+  color: var(--text-secondary);
+}
+
+.reaction-picker {
+  position: absolute;
+  bottom: calc(100% + 4px);
+  left: 0;
+  z-index: 5;
+  display: flex;
+  gap: 2px;
+  padding: 3px;
+  border-radius: 18px;
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+}
+
+.bubble-row.mine .reaction-picker {
+  left: auto;
+  right: 0;
+}
+
+.reaction-picker button {
+  width: 30px;
+  height: 30px;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  font-size: 17px;
+  cursor: pointer;
+  transition: transform 0.1s;
+}
+
+.reaction-picker button:hover {
+  background: var(--surface-hover);
+  transform: scale(1.15);
+}
+
+.reaction-picker button.active {
+  background: var(--accent-soft);
+}
+
+.reactions {
+  position: relative;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: -3px;
+  padding: 0 6px;
+}
+
+.reaction {
+  height: 22px;
+  padding: 0 6px;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  border-radius: 11px;
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.reaction span {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.reaction.mine {
+  border-color: var(--accent-fg);
+  background: var(--accent-soft);
+}
+
+.reaction.mine span {
+  color: var(--accent-fg);
+}
+
+.bubble-quote {
+  display: flex;
+  flex-direction: column;
+  margin-bottom: 4px;
+  padding: 3px 8px;
+  border-left: 3px solid var(--accent-fg);
+  border-radius: 4px;
+  background: var(--surface-hover);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.bubble.mine .bubble-quote {
+  border-left-color: rgba(255, 255, 255, 0.8);
+  background: rgba(255, 255, 255, 0.15);
+}
+
+.image-bubble .bubble-quote {
+  margin: 2px 2px 6px;
+  width: auto;
+}
+
+.quote-author {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.quote-text {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  opacity: 0.85;
+  word-break: break-word;
+}
+
+.reply-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border-top: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--accent-fg);
+  flex-shrink: 0;
+}
+
+.reply-bar .item-body {
+  color: var(--text);
+}
+
+.subtitle.typing {
+  color: var(--accent-fg);
+  font-style: italic;
+}
+
+/* A message brought into view (search, quote, pin). */
+.flash {
+  animation: flash 1.4s ease-out;
+  border-radius: 8px;
+}
+
+@keyframes flash {
+  from { background: var(--accent-soft); }
+  to { background: transparent; }
+}
+
+.bubble-row.current .bubble {
+  box-shadow: 0 0 0 2px var(--accent-fg);
+}
+
+.search-mark {
+  background: #ffd54f;
+  color: #1b1b1b;
+  border-radius: 2px;
+}
+
+.chat-search {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0 12px 8px;
+  flex-shrink: 0;
+}
+
+.chat-search .search-box {
+  flex: 1;
+  margin-right: 4px;
+}
+
+.search-count {
+  min-width: 34px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  text-align: center;
+}
+
+/* ─── Mentions and pins (groups) ─── */
+.mention {
+  font-weight: 600;
+  color: var(--accent-fg);
+}
+
+.bubble.mine .mention {
+  color: inherit;
+  text-decoration: underline;
+}
+
+.bubble.theirs.mentioned {
+  border-color: var(--accent-fg);
+  background: var(--accent-soft);
+}
+
+.mention-popup {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: calc(100% + 4px);
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  padding: 4px;
+  border-radius: 6px;
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
+}
+
+.mention-popup button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+  min-width: 0;
+}
+
+.mention-popup button:hover,
+.mention-popup button.active {
+  background: var(--surface-hover);
+}
+
+.mention-popup .item-sub {
+  margin-left: auto;
+  padding-left: 8px;
+}
+
+.pin-bar {
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.pin-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 14px;
+  color: var(--accent-fg);
+}
+
+.pin-head:hover {
+  background: var(--surface-hover);
+}
+
+.pin-head .item-body {
+  color: var(--text);
+}
+
+.pin-title {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.pin-list {
+  max-height: 220px;
+  overflow-y: auto;
+  border-top: 1px solid var(--border);
+}
+
+.pin-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px 6px 38px;
+}
+
+.pin-item + .pin-item {
+  border-top: 1px solid var(--border);
+}
+
+.pin-item:hover {
+  background: var(--surface-hover);
+}
+
+.pin-item .list-button {
+  padding: 0;
+  font-size: 13px;
+}
+
+.pinned-mark {
+  display: inline-flex;
+  vertical-align: -1px;
+  margin-right: 4px;
+}
+
+.title-with-icon {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.muted-icon {
+  display: inline-flex;
+  flex-shrink: 0;
+  color: var(--text-secondary);
+}
+
+.badges {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.file-dir {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.app.dropping .drop-area {
+  box-shadow: inset 0 0 0 2px var(--accent);
+  background: var(--accent-soft);
+}
+
+/* ─── Menus, settings, dialogs ─── */
+.menu-label {
+  padding: 6px 10px 4px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.menu-check {
+  width: 14px;
+  display: inline-flex;
+  flex-shrink: 0;
+}
+
+.menu-hint {
+  display: block;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.check-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.check-line input {
+  accent-color: var(--accent-fg);
+  width: 16px;
+  height: 16px;
+}
+
+.warning-text {
+  color: var(--danger);
+}
+
+.spinner {
+  width: 13px;
+  height: 13px;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+/* ─── Notification settings ─── */
+.setting-row.disabled {
+  opacity: 0.5;
+}
+
+.muted-mark {
+  display: inline-flex;
+  vertical-align: -1px;
+  margin-left: 6px;
+  color: var(--text-secondary);
+}
+
+/* ─── Mobile (Android): full screen, touch ─── */
+/* Everything below applies only with the "mobile" class on <html>
+   (platform.ts): the desktop flyout is unchanged. */
+.mobile body {
+  font-size: 15px;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* The height left by the keyboard (visualViewport), else the dynamic one. */
+.mobile #root {
+  width: 100%;
+  height: var(--app-height, 100dvh);
+}
+
+.mobile .app {
+  border: none;
+  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+}
+
+.mobile .header {
+  padding: 8px 8px 6px 12px;
+}
+
+.mobile .title {
+  font-size: 17px;
+}
+
+.mobile .subtitle {
+  font-size: 13px;
+}
+
+/* Touch targets of 44 px at least. */
+.mobile .icon-btn {
+  width: 44px;
+  height: 44px;
+}
+
+.mobile .icon-btn.small {
+  width: 40px;
+  height: 40px;
+}
+
+.mobile .icon-btn.attach {
+  height: 44px;
+}
+
+.mobile .btn {
+  height: 44px;
+  font-size: 15px;
+}
+
+.mobile .btn-small {
+  height: 40px;
+  font-size: 14px;
+}
+
+.mobile .btn-icon {
+  width: 44px;
+  height: 44px;
+}
+
+.mobile .btn-link {
+  font-size: 14px;
+  padding: 10px 4px;
+}
+
+.mobile .input {
+  height: 44px;
+  font-size: 16px;
+}
+
+.mobile .chat-input-row .input,
+.mobile .chat-textarea {
+  height: 44px;
+  min-height: 44px;
+  padding: 11px 12px;
+  line-height: 20px;
+}
+
+.mobile .chat-error {
+  bottom: 66px;
+}
+
+.mobile .pivot-btn {
+  padding: 13px 10px 14px;
+  font-size: 15px;
+}
+
+.mobile .item-title,
+.mobile .setting-label,
+.mobile .offer-title,
+.mobile .bubble,
+.mobile .empty-state,
+.mobile .modal-text,
+.mobile .welcome-text,
+.mobile .menu-popover button,
+.mobile .mention-popup button,
+.mobile .section-toggle {
+  font-size: 15px;
+}
+
+.mobile .item-sub,
+.mobile .setting-sub,
+.mobile .card-label,
+.mobile .section-header,
+.mobile .offer-desc,
+.mobile .error-text,
+.mobile .transfer-meta,
+.mobile .transfer-status,
+.mobile .transfer-strip,
+.mobile .path-box,
+.mobile .id-value,
+.mobile .id-full,
+.mobile .pin-title,
+.mobile .quote-author,
+.mobile .bubble-quote,
+.mobile .group-banner,
+.mobile .toast {
+  font-size: 13px;
+}
+
+.mobile .bubble-time,
+.mobile .item-time,
+.mobile .bubble-author,
+.mobile .day-divider {
+  font-size: 12px;
+}
+
+.mobile .modal-title {
+  font-size: 17px;
+}
+
+.mobile .welcome-title {
+  font-size: 22px;
+}
+
+.mobile .list-item {
+  padding: 12px;
+  min-height: 56px;
+}
+
+.mobile .avatar {
+  width: 40px;
+  height: 40px;
+  font-size: 15px;
+}
+
+.mobile .avatar.small {
+  width: 34px;
+  height: 34px;
+  font-size: 14px;
+}
+
+.mobile .id-value {
+  max-width: none;
+}
+
+.mobile .segmented button {
+  height: 38px;
+  font-size: 14px;
+}
+
+.mobile .toggle {
+  width: 46px;
+  height: 26px;
+}
+
+.mobile .toggle-track {
+  border-radius: 13px;
+}
+
+.mobile .toggle-track::before {
+  width: 18px;
+  height: 18px;
+}
+
+.mobile .check-row input,
+.mobile .check-line input {
+  width: 20px;
+  height: 20px;
+}
+
+.mobile .reaction {
+  height: 30px;
+  padding: 0 9px;
+  font-size: 15px;
+}
+
+/* Menus: larger rows, never wider than the screen. */
+.mobile .menu-popover {
+  max-width: calc(100vw - 16px);
+  max-height: calc(var(--app-height, 100dvh) - 16px);
+  overflow-y: auto;
+}
+
+.mobile .menu-popover button {
+  min-height: 44px;
+  padding: 10px 12px;
+}
+
+.mobile .mention-popup button {
+  min-height: 44px;
+}
+
+.mobile .pin-head,
+.mobile .pin-item {
+  min-height: 48px;
+}
+
+/* No text selection by touch: a long press opens the message's actions. */
+.mobile .bubble {
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+}
+
+/* The actions shown on hover: on a line of their own under the bubble,
+   after a long press. */
+.mobile .bubble-row {
+  flex-wrap: wrap;
+}
+
+.mobile .bubble-actions {
+  display: none;
+}
+
+.mobile .bubble-actions.open {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  flex-basis: 100%;
+  gap: 4px;
+  margin-top: 2px;
+  opacity: 1;
+}
+
+.mobile .bubble-row.mine .bubble-actions.open {
+  justify-content: flex-end;
+}
+
+.mobile .bubble-actions .react-toggle {
+  display: none;
+}
+
+.mobile .reaction-picker {
+  position: static;
+  order: -1;
+  box-shadow: none;
+  border-radius: 22px;
+}
+
+.mobile .reaction-picker button {
+  width: 40px;
+  height: 40px;
+  font-size: 22px;
+}
+
+.mobile .drop-hint,
+.mobile .toast {
+  bottom: calc(16px + env(safe-area-inset-bottom));
+}
+
+.mobile .modal-backdrop {
+  padding: calc(16px + env(safe-area-inset-top)) 16px calc(16px + env(safe-area-inset-bottom));
 }

@@ -1,13 +1,14 @@
 {
   "name": "p2pshare",
   "private": true,
-  "version": "3.3.0",
+  "version": "3.4.0",
   "description": "Secure P2P file sharing and chat (Tauri + iroh)",
   "author": "lamzii",
   "license": "MIT",
   "type": "module",
   "scripts": {
     "dev": "tauri dev",
+    "tauri": "tauri",
     "dev:web": "vite",
     "build:web": "tsc -b && vite build",
     "dist": "node scripts/dist.mjs",

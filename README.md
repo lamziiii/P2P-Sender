@@ -18,7 +18,11 @@ Or download the installer for your system from the [latest release](https://gith
 - **macOS** (Apple Silicon): `P2PShare_*_aarch64.dmg`
 - **Linux**: `P2PShare_*_amd64.AppImage`
 
-The installers are not signed: Windows SmartScreen may ask you to confirm. Each release lists the SHA-256 of its files in `SHA256SUMS.txt`.
+The installers are not signed yet: Windows SmartScreen may ask you to confirm, and Smart App Control may block them.
+
+**macOS**: the app is not notarized by Apple, so macOS refuses to open it the first time. Right-click the app in Applications → Open, or run `xattr -cr /Applications/P2PShare.app`. It lives in the menu bar (no Dock icon). On macOS 15 and later, allow it on the local network when asked: LocalSend and the fast local-network path need it.
+
+**Linux**: the AppImage needs FUSE 2 (`sudo apt install libfuse2` on Ubuntu 22.04 and later), then `chmod +x P2PShare_*.AppImage`. GNOME shows tray icons only with the AppIndicator extension; without it, launch the app again to bring its window back. On Wayland the window opens where the compositor puts it. Each release lists the SHA-256 of its files in `SHA256SUMS.txt`.
 
 ## Features
 
@@ -30,6 +34,19 @@ The installers are not signed: Windows SmartScreen may ask you to confirm. Each 
 - **Friends only**: your ID is your public key (64 hex characters); only your friends and the members of your groups can connect, and every connection is checked against their key.
 - **Self-hosted relay**: for networks that block iroh's public relays.
 - **Tray app**: Windows 11 (Fluent) look, dark and light themes, clickable notifications, optional start with the computer (hidden in the tray).
+
+## What's new in 3.4
+
+- **Chat**: reply to a message, react with an emoji, see when a message was read and when a friend is typing (can be turned off), search a conversation, clickable web links, and pictures (jpg, png, gif, webp, bmp) shown in the conversation with a preview.
+- **Folders and transfers**: send whole folders, keeping their tree; drag and drop on a friend, a group or a LocalSend device; pause and resume; speed limit; accept a friend's files automatically (programs still ask). Folders of small files go about 20 times faster, and the list shows whether a transfer is on the local network, direct or through a relay.
+- **Groups**: @mentions, pinned messages and files, silent groups, and shared folders that keep their tree when downloaded.
+- **Notifications**: settings by kind, per chat and per group, and Do Not Disturb.
+- **Your data**: history and identity are encrypted on disk (the key is tied to your session on Windows and kept in the Keychain on macOS; on Linux it stays in a private file). Backup and restore your identity with a password-protected file: without a backup, your ID cannot be recovered after reinstalling the system.
+- **Easier to use**: welcome on first launch, nicknames between friends, a conversation list with the last message, OneDrive colors, and the window goes away when you click elsewhere (pin it to drag files from the file explorer).
+- **Lighter**: the app sleeps when idle, retries offline friends less and less often, and groups use about a third of the memory.
+- Many fixes: safer saves, offers and cancels that always get through, more robust LocalSend, local-network and group sync.
+
+Friends on 3.3 can still talk to you: they receive pictures as plain files and folders without their tree, and do not see reactions, read marks or pins.
 
 ## What's new in 3.3
 
@@ -82,7 +99,7 @@ Version 3 replaced Electron/Node.js with Tauri/Rust and Hyperswarm with iroh:
 
 ### Prerequisites
 
-- [Node.js](https://nodejs.org/) (v20 or higher)
+- [Node.js](https://nodejs.org/) 20.19+ or 22.12+ (required by Vite 8)
 - [Rust](https://rustup.rs/) (stable)
 - Linux only: `libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev`
 
@@ -101,11 +118,25 @@ npm run dev
 npm run dist
 ```
 
-The app and its installer are copied to `release/`. Cargo's working files go to `%LOCALAPPDATA%\p2pshare-target` (or `$CARGO_TARGET_DIR`): several GB that do not belong in the project folder, and Windows refuses to run the build scripts Cargo compiles inside a OneDrive folder.
+The app and its installer are copied to `release/`. Cargo's working files go to `$CARGO_TARGET_DIR` when it is set, otherwise to `%LOCALAPPDATA%\p2pshare-target` on Windows and `~/.cache/p2pshare-target` on macOS and Linux: several GB that do not belong in the project folder, and Windows refuses to run the build scripts Cargo compiles inside a OneDrive folder.
 
 ### Release
 
-Push a version tag (`git tag v3.3.0 && git push origin v3.3.0`): GitHub Actions builds the installers for the three systems, publishes the release, then submits the new version to winget (see `.github/workflows/build.yml`). The winget step needs a `WINGET_TOKEN` secret: a classic GitHub token with the `public_repo` scope.
+Set the same version in `package.json`, `src-tauri/tauri.conf.json` and `src-tauri/Cargo.toml`, then push a version tag (`git tag v3.3.0 && git push origin v3.3.0`): GitHub Actions checks that the tag matches that version, builds the installers for the three systems, publishes the release, then submits the new version to winget (see `.github/workflows/build.yml`). A prerelease tag (`v3.4.0-beta.1`) is published as a prerelease, not marked latest, and not sent to winget. The winget step needs a `WINGET_TOKEN` secret: a classic GitHub token with the `public_repo` scope.
+
+### Android
+
+GitHub Actions builds an arm64 APK on every push, downloadable from the Actions tab as `Test-android`: it is signed with a temporary key, so each build must replace the previous one by uninstalling it first. To attach an APK to releases, create a release key once and keep it safe (without it, the app can never be updated), then add the secrets `ANDROID_KEYSTORE_BASE64` (the keystore in base64), `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS` and `ANDROID_KEY_PASSWORD`.
+
+### Code signing
+
+Windows release builds are signed through [SignPath](https://signpath.io) once the repository has its settings; without them, the installers are built unsigned as before. The workflow signs `p2pshare.exe` first, builds the installer around it (`tauri bundle`), then signs the installer. It needs:
+
+- the secret `SIGNPATH_API_TOKEN` (a SignPath API token of a CI user allowed to submit signing requests);
+- the repository variables `SIGNPATH_ORGANIZATION_ID`, `SIGNPATH_PROJECT_SLUG` and `SIGNPATH_SIGNING_POLICY_SLUG`;
+- on SignPath, a trusted build system for GitHub.com linked to the project, and an artifact configuration that signs the `.exe` at the root of the artifact.
+
+Only version tags are signed, not every push or pull request.
 
 ### Tests and benchmark
 
@@ -121,7 +152,7 @@ pwsh bench/run.ps1 -Sender v3 -Receiver v3 -File <some big file>
 
 - `groups_test` runs three nodes (two of them not friends) through invitations, group chat, delivery to a member who was offline, shared-file downloads from another member, and removal.
 - `localsend_receiver` runs a node with LocalSend on that accepts every file (except names containing `refuse`, declined, or `attente`, left unanswered; it cancels names containing `annule` midway), to send to from a LocalSend app or the LocalSend CLI. `localsend_send` sends files, or a text message, to a device by name and reports the outcome.
-- `bench` sends a file between two headless nodes and reports the throughput; set `BENCH_NO_LAN=1` to compare without the local-network path. `bench/run.ps1` runs it and also reports peak memory and CPU time; with `-Sender v2` it uses the Electron version's core (`../P2P_electron`) for comparison.
+- `bench` sends a file (or several, or a folder; `BENCH_COUNT` tells the receiver how many files to wait for) between two headless nodes and reports the throughput; set `BENCH_NO_LAN=1` to compare without the local-network path. `bench/run.ps1` runs it and also reports peak memory and CPU time; with `-Sender v2` it uses the Electron version's core (`../P2P_electron`) for comparison.
 
 ## Project layout
 

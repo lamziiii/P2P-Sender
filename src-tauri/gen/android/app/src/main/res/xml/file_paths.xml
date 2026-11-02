@@ -1,0 +1,10 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<paths xmlns:android="http://schemas.android.com/apk/res/android">
+  <!-- Received files (Download/P2PShare), and documents opened from there. -->
+  <external-path name="external" path="." />
+  <!-- Received files when the shared storage cannot be written. -->
+  <external-files-path name="external_files" path="." />
+  <!-- Files shared in groups, copies of sent documents. -->
+  <files-path name="files" path="." />
+  <cache-path name="cache" path="." />
+</paths>

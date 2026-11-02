@@ -157,7 +157,11 @@ fn query(pairs: &[(&str, &str)]) -> String {
 
 /// Stream a file into an upload body; fails if the file cannot be read in
 /// full. Stops quietly if the request ends first.
-async fn read_file(file: &OutgoingFile, tx: mpsc::Sender<io::Result<Bytes>>) -> io::Result<()> {
+async fn read_file(
+    node: &Node,
+    file: &OutgoingFile,
+    tx: mpsc::Sender<io::Result<Bytes>>,
+) -> io::Result<()> {
     let result = async {
         let mut f = tokio::fs::File::open(&file.path).await?;
         let mut sent = 0;
@@ -170,6 +174,8 @@ async fn read_file(file: &OutgoingFile, tx: mpsc::Sender<io::Result<Bytes>>) -> 
                 ));
             }
             sent += buf.len() as u64;
+            // The speed limit of the settings, as for friends.
+            node.throttle_upload(buf.len()).await;
             if tx.send(Ok(buf.freeze())).await.is_err() {
                 return Ok(());
             }
@@ -218,9 +224,10 @@ impl Inner {
                 Some(pin) => tls_connector(&self.identity, Some(pin)).map_err(io::Error::other)?,
                 None => self.connector.clone(),
             };
-            let tls = connector
-                .connect(ServerName::IpAddress(peer.ip.into()), tcp)
-                .await?;
+            let handshake = connector.connect(ServerName::IpAddress(peer.ip.into()), tcp);
+            let tls = tokio::time::timeout(HANDSHAKE_TIMEOUT, handshake)
+                .await
+                .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))??;
             let cert = tls
                 .get_ref()
                 .1
@@ -254,7 +261,12 @@ impl Inner {
         result
     }
 
-    pub(super) async fn send_session(self: Arc<Self>, device: Device, files: Vec<OutgoingFile>) {
+    /// `target`: the device, and whether it is listed (see `resolve`).
+    pub(super) async fn send_session(
+        self: Arc<Self>,
+        target: (Device, bool),
+        files: Vec<OutgoingFile>,
+    ) {
         let tids: Vec<String> = files.iter().map(|f| f.tid.clone()).collect();
         let _guard = StopGuard {
             node: self.node.clone(),
@@ -263,6 +275,17 @@ impl Inner {
             error: "LocalSend désactivé",
             armed: true,
         };
+        let Some(device) = self.resolve(target).await else {
+            for tid in &tids {
+                self.node.external_stop(
+                    tid,
+                    Status::Error,
+                    Some("Appareil introuvable : est-il allumé, avec LocalSend ouvert ?"),
+                );
+            }
+            return;
+        };
+        self.note_known(&device);
         let peer = Peer::of(&device);
         let list: serde_json::Map<String, Value> = files
             .iter()
@@ -342,7 +365,7 @@ impl Inner {
             .boxed();
             let upload = async {
                 tokio::join!(
-                    read_file(file, tx),
+                    read_file(&self.node, file, tx),
                     self.request(&peer, &path, "application/octet-stream", body)
                 )
             };
@@ -430,10 +453,14 @@ impl Inner {
             ])
         );
         let body = bytes_body(Bytes::from(text));
-        match self.request(&peer, &path, "text/plain", body).await {
-            Ok((StatusCode::OK, ..)) => Ok(()),
-            Ok((status, ..)) => Err(format!("Erreur de l’appareil (erreur {})", status.as_u16())),
-            Err(e) => Err(unreachable(&e)),
+        let upload = self.request(&peer, &path, "text/plain", body);
+        match tokio::time::timeout(IDLE_TIMEOUT, upload).await {
+            Ok(Ok((StatusCode::OK, ..))) => Ok(()),
+            Ok(Ok((status, ..))) => {
+                Err(format!("Erreur de l’appareil (erreur {})", status.as_u16()))
+            }
+            Ok(Err(e)) => Err(unreachable(&e)),
+            Err(_) => Err("L’appareil ne répond plus".into()),
         }
     }
 

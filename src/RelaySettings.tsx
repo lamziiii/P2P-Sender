@@ -1,12 +1,13 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { api } from './api';
-import type { Config, RelayStatus } from './api';
+import type { Config } from './api';
+import { useRelayStatus } from './relay';
 
 // Self-hosted relay, for networks that block iroh's public relays (eduroam…).
 export function RelaySettings({ config }: { config: Partial<Config> }) {
   const [url, setUrl] = useState(config.relayUrl ?? '');
   const [token, setToken] = useState(config.relayToken ?? '');
-  const [status, setStatus] = useState<RelayStatus | null>(null);
+  const status = useRelayStatus();
   const [error, setError] = useState('');
   const [applying, setApplying] = useState(false);
 
@@ -17,13 +18,6 @@ export function RelaySettings({ config }: { config: Partial<Config> }) {
     setUrl(config.relayUrl ?? '');
     setToken(config.relayToken ?? '');
   }
-
-  useEffect(() => {
-    const load = () => api.getRelayStatus().then(setStatus);
-    load();
-    const timer = setInterval(load, 3000);
-    return () => clearInterval(timer);
-  }, []);
 
   const norm = (u: string) => u.trim().replace(/\/+$/, '');
   const host = (u: string) => {
