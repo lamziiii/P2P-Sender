@@ -1,11 +1,12 @@
 import { useState } from 'react';
 import { api } from './api';
 import type { Config, NotifySettings } from './api';
-import { BackupCard } from './Backup';
+import { BackupRow } from './Backup';
 import { Icon } from './icons';
-import { LocalSendSettings } from './LocalSendSettings';
-import { byPlatform, isMobile, MOBILE_DOWNLOADS } from './platform';
+import { LocalSendStatusRow } from './LocalSendSettings';
+import { isMac, isMobile, MOBILE_DOWNLOADS } from './platform';
 import { RelaySettings } from './RelaySettings';
+import { UpdateRows } from './Update';
 
 export type Theme = 'light' | 'dark' | 'system';
 
@@ -24,6 +25,16 @@ const THEMES: { value: Theme; label: string }[] = [
   { value: 'system', label: 'Système' },
 ];
 
+function Toggle({ checked, onChange }: { checked: boolean; onChange: (checked: boolean) => void }) {
+  return (
+    <label className="toggle">
+      <input type="checkbox" checked={checked} onChange={e => onChange(e.target.checked)} />
+      <span className="toggle-track" />
+    </label>
+  );
+}
+
+// Sections, each a title and one card of rows; the network ones folded.
 export function SettingsTab({ config, setConfig, myId, theme, setTheme, advancedOpen, onBack }: {
   config: Partial<Config>;
   setConfig: (update: (c: Partial<Config>) => Partial<Config>) => void;
@@ -36,7 +47,7 @@ export function SettingsTab({ config, setConfig, myId, theme, setTheme, advanced
 }) {
   const [nickname, setNickname] = useState(config.nickname ?? '');
   const [saved, setSaved] = useState(false);
-  const [advanced, setAdvanced] = useState(advancedOpen);
+  const [network, setNetwork] = useState(advancedOpen);
   const [copied, setCopied] = useState(false);
   // Mobile: false once set_background_service failed (not in this backend).
   const [backgroundOk, setBackgroundOk] = useState(true);
@@ -68,134 +79,128 @@ export function SettingsTab({ config, setConfig, myId, theme, setTheme, advanced
         <span>Paramètres</span>
       </div>
 
-      <div className="card">
-        <div className="card-label">Mon pseudo{saved && <span className="saved-mark"> · Enregistré ✓</span>}</div>
-        <input
-          className="input"
-          maxLength={40}
-          placeholder="Votre pseudo"
-          value={nickname}
-          onChange={e => setNickname(e.target.value)}
-          onBlur={saveNickname}
-          onKeyDown={e => e.key === 'Enter' && e.currentTarget.blur()}
-        />
-        <div className="setting-sub" style={{ marginTop: 6 }}>Vu par vos amis, les membres de vos groupes et les appareils LocalSend.</div>
-      </div>
-
-      <div className="card">
-        <div className="card-label">Dossier de téléchargement</div>
-        {isMobile ? (
-          <>
-            <div className="path-box">{MOBILE_DOWNLOADS}</div>
-            <div className="setting-sub" style={{ marginTop: 6 }}>Les fichiers reçus arrivent dans ce dossier de votre appareil.</div>
-          </>
-        ) : (
-          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-            <div className="path-box" title={config.downloadPath}>{config.downloadPath || 'Dossier système'}</div>
-            <button className="btn btn-secondary btn-small" onClick={async () => {
-              const p = await api.selectDownloadDir();
-              if (p) setConfig(c => ({ ...c, downloadPath: p }));
-            }}>Changer</button>
-          </div>
-        )}
-      </div>
-
-      <div className="card">
-        <div className="card-label">Thème</div>
-        <div className="segmented" role="radiogroup">
-          {THEMES.map(t => (
-            <button key={t.value} role="radio" aria-checked={theme === t.value} className={theme === t.value ? 'active' : ''} onClick={() => setTheme(t.value)}>
-              {t.label}
-            </button>
-          ))}
+      <div className="settings-heading">Profil</div>
+      <div className="card rows">
+        <div>
+          <div className="setting-label">Pseudo{saved && <span className="saved-mark"> · Enregistré ✓</span>}</div>
+          <input
+            className="input"
+            style={{ marginTop: 6 }}
+            maxLength={40}
+            placeholder="Votre pseudo"
+            value={nickname}
+            onChange={e => setNickname(e.target.value)}
+            onBlur={saveNickname}
+            onKeyDown={e => e.key === 'Enter' && e.currentTarget.blur()}
+          />
+          <div className="setting-sub" style={{ marginTop: 4 }}>Vu par vos amis, vos groupes et les appareils LocalSend.</div>
         </div>
-        {theme === 'system' && <div className="setting-sub" style={{ marginTop: 6 }}>{byPlatform('Suit le thème de Windows.', 'Suit le thème de l’appareil.')}</div>}
+        <div className="setting-row">
+          <div style={{ minWidth: 0 }}>
+            <div className="setting-label">Mon identifiant P2P</div>
+            <div className="id-value" title={myId}>{myId}</div>
+          </div>
+          <button className="btn btn-secondary btn-small" onClick={copy}><Icon name="copy" size={14} />{copied ? 'Copié !' : 'Copier'}</button>
+        </div>
       </div>
 
-      {isMobile ? (
-        backgroundOk && (
-          <div className="card">
+      <div className="settings-heading">Général</div>
+      <div className="card rows">
+        <div>
+          <div className="setting-label">Thème</div>
+          <div className="segmented" role="radiogroup" style={{ marginTop: 6 }}>
+            {THEMES.map(t => (
+              <button key={t.value} role="radio" aria-checked={theme === t.value} className={theme === t.value ? 'active' : ''} onClick={() => setTheme(t.value)}>
+                {t.label}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div>
+          <div className="setting-label">Dossier de téléchargement</div>
+          {isMobile
+            ? <div className="path-box" style={{ marginTop: 6 }}>{MOBILE_DOWNLOADS}</div>
+            : (
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 6 }}>
+                <div className="path-box" title={config.downloadPath}>{config.downloadPath || 'Dossier système'}</div>
+                <button className="btn btn-secondary btn-small" onClick={async () => {
+                  const p = await api.selectDownloadDir();
+                  if (p) setConfig(c => ({ ...c, downloadPath: p }));
+                }}>Changer</button>
+              </div>
+            )}
+        </div>
+        {isMobile
+          ? backgroundOk && (
             <div className="setting-row">
               <div>
                 <div className="setting-label">Rester joignable en arrière-plan</div>
-                <div className="setting-sub">Recevoir messages et fichiers l’application fermée. Android affiche alors une notification permanente.</div>
+                <div className="setting-sub">Recevoir messages et fichiers l’application fermée, avec une notification permanente.</div>
               </div>
-              <label className="toggle">
-                <input
-                  type="checkbox"
-                  checked={config.backgroundService ?? false}
-                  onChange={async (e) => {
-                    try {
-                      const val = await api.setBackgroundService(e.target.checked);
-                      setConfig(c => ({ ...c, backgroundService: val }));
-                    } catch {
-                      // Not available on this version: the setting goes away.
-                      setBackgroundOk(false);
-                    }
-                  }}
-                />
-                <span className="toggle-track" />
-              </label>
+              <Toggle
+                checked={config.backgroundService ?? false}
+                onChange={async checked => {
+                  try {
+                    const val = await api.setBackgroundService(checked);
+                    setConfig(c => ({ ...c, backgroundService: val }));
+                  } catch {
+                    // Not available on this version: the setting goes away.
+                    setBackgroundOk(false);
+                  }
+                }}
+              />
             </div>
-          </div>
-        )
-      ) : (
-        <div className="card">
-          <div className="setting-row">
-            <div>
-              <div className="setting-label">Lancement au démarrage</div>
-              <div className="setting-sub">Démarrer avec l’ordinateur, dans la zone de notification</div>
-            </div>
-            <label className="toggle">
-              <input
-                type="checkbox"
+          )
+          : (
+            <div className="setting-row">
+              <div>
+                <div className="setting-label">Lancer au démarrage</div>
+                <div className="setting-sub">Avec l’ordinateur, {isMac ? 'dans la barre des menus' : 'dans la zone de notification'}</div>
+              </div>
+              <Toggle
                 checked={config.autoLaunch ?? true}
-                onChange={async (e) => {
-                  const val = await api.setAutoLaunch(e.target.checked);
+                onChange={async checked => {
+                  const val = await api.setAutoLaunch(checked);
                   setConfig(c => ({ ...c, autoLaunch: val }));
                 }}
               />
-              <span className="toggle-track" />
-            </label>
-          </div>
-        </div>
-      )}
+            </div>
+          )}
+      </div>
 
-      <div className="card">
+      <div className="settings-heading">Discussions et notifications</div>
+      <div className="card rows">
         <div className="setting-row">
           <div>
             <div className="setting-label">Confirmations de lecture</div>
-            <div className="setting-sub">« Vu » et « en train d’écrire… » avec vos amis. Désactivées, vous ne les voyez plus non plus.</div>
+            <div className="setting-sub">« Vu » et « en train d’écrire… ». Désactivées, vous ne les voyez plus non plus.</div>
           </div>
-          <label className="toggle">
-            <input
-              type="checkbox"
-              checked={config.readReceipts ?? true}
-              onChange={async (e) => {
-                const val = await api.setReadReceipts(e.target.checked);
-                setConfig(c => ({ ...c, readReceipts: val }));
-              }}
-            />
-            <span className="toggle-track" />
-          </label>
+          <Toggle
+            checked={config.readReceipts ?? true}
+            onChange={async checked => {
+              const val = await api.setReadReceipts(checked);
+              setConfig(c => ({ ...c, readReceipts: val }));
+            }}
+          />
         </div>
+        <NotificationRows config={config} setConfig={setConfig} />
       </div>
 
-      <NotificationsCard config={config} setConfig={setConfig} />
+      <div className="settings-heading">Sauvegarde</div>
+      <div className="card rows">
+        <BackupRow />
+      </div>
 
-      <BackupCard />
-
-      <button className="section-toggle list-button" aria-expanded={advanced} onClick={() => setAdvanced(!advanced)}>
-        <Icon name={advanced ? 'chevronDown' : 'chevronRight'} size={14} />
-        Avancé
-        <span className="setting-sub">Vitesse, LocalSend, relais, identifiant</span>
+      <button className="section-toggle list-button" aria-expanded={network} onClick={() => setNetwork(!network)}>
+        <Icon name={network ? 'chevronDown' : 'chevronRight'} size={14} />
+        Réseau
+        <span className="setting-sub">Vitesse, relais, LocalSend</span>
       </button>
-
-      {advanced && (
-        <>
-          <div className="card">
-            <div className="card-label">Limiter la vitesse</div>
-            <div className="segmented" role="radiogroup">
+      {network && (
+        <div className="card rows">
+          <div>
+            <div className="setting-label">Limiter la vitesse</div>
+            <div className="segmented" role="radiogroup" style={{ marginTop: 6 }}>
               {SPEEDS.map(s => (
                 <button
                   key={s.value}
@@ -211,33 +216,24 @@ export function SettingsTab({ config, setConfig, myId, theme, setTheme, advanced
                 </button>
               ))}
             </div>
-            <div className="setting-sub" style={{ marginTop: 6 }}>Pour chaque sens (envoi, réception), pour laisser de la place au reste du réseau.</div>
+            <div className="setting-sub" style={{ marginTop: 4 }}>Dans chaque sens, pour laisser de la place au reste du réseau.</div>
           </div>
-
-          <LocalSendSettings
-            enabled={config.localsend ?? false}
-            nickname={config.nickname}
-            onChange={localsend => setConfig(c => ({ ...c, localsend }))}
-          />
-
           <RelaySettings config={config} />
-
-          <div className="card">
-            <div className="section-header-row">
-              <div className="card-label" style={{ marginBottom: 0 }}>Mon identifiant P2P</div>
-              <button className="btn btn-secondary btn-small" onClick={copy}><Icon name="copy" size={14} />{copied ? 'Copié !' : 'Copier'}</button>
-            </div>
-            <div className="id-full" style={{ marginTop: 6 }}>{myId}</div>
-          </div>
-        </>
+          <LocalSendStatusRow nickname={config.nickname} />
+        </div>
       )}
+
+      <div className="settings-heading">À propos</div>
+      <div className="card rows">
+        <UpdateRows config={config} setConfig={setConfig} />
+      </div>
     </>
   );
 }
 
 // Which system notifications show. Each chat and group can also be made
 // silent from its own menu.
-function NotificationsCard({ config, setConfig }: {
+function NotificationRows({ config, setConfig }: {
   config: Partial<Config>;
   setConfig: (update: (c: Partial<Config>) => Partial<Config>) => void;
 }) {
@@ -249,25 +245,26 @@ function NotificationsCard({ config, setConfig }: {
     const saved = await api.setNotifications(next.enabled, next.messages, next.files, next.groups);
     setConfig(c => ({ ...c, notifications: saved }));
   };
-  const row = (label: string, sub: string, checked: boolean, change: Partial<NotifySettings>, disabled = false) => (
-    <div className={`setting-row ${disabled ? 'disabled' : ''}`}>
+  const row = (label: string, sub: string, checked: boolean, change: Partial<NotifySettings>, nested = false) => (
+    <div className={`setting-row ${nested ? 'nested' : ''}`}>
       <div>
         <div className="setting-label">{label}</div>
         <div className="setting-sub">{sub}</div>
       </div>
-      <label className="toggle">
-        <input type="checkbox" checked={checked} disabled={disabled} onChange={() => set(change)} />
-        <span className="toggle-track" />
-      </label>
+      <Toggle checked={checked} onChange={() => set(change)} />
     </div>
   );
   return (
-    <div className="card stack">
+    <>
       {row('Notifications', 'Les messages et fichiers arrivent toujours, seules les alertes changent.', n.enabled, { enabled: !n.enabled })}
-      {row('Messages', 'Vos amis et les appareils LocalSend', n.messages, { messages: !n.messages }, !n.enabled)}
-      {row('Fichiers', 'Fichiers et dossiers proposés ou reçus', n.files, { files: !n.files }, !n.enabled)}
-      {row('Groupes', 'Messages, mentions et invitations', n.groups, { groups: !n.groups }, !n.enabled)}
-      <div className="setting-sub">Pour faire taire une seule discussion : menu ⋯ d’un ami, cloche d’un appareil LocalSend, réglages d’un groupe.</div>
-    </div>
+      {n.enabled && (
+        <>
+          {row('Messages', 'Vos amis et les appareils LocalSend', n.messages, { messages: !n.messages }, true)}
+          {row('Fichiers', 'Fichiers et dossiers proposés ou reçus', n.files, { files: !n.files }, true)}
+          {row('Groupes', 'Messages, mentions et invitations', n.groups, { groups: !n.groups }, true)}
+          <div className="setting-sub nested">Pour une seule discussion : menu ⋯ d’un ami, cloche d’un appareil LocalSend, réglages d’un groupe.</div>
+        </>
+      )}
+    </>
   );
 }

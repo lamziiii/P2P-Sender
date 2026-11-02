@@ -7,7 +7,7 @@
 //! the result covers all of them. A single folder is sent as a folder
 //! (BENCH_COUNT is then its number of files), which the receiver accepts.
 //! Both sides publish their ID in <workdir>/<role>.id and read the other's,
-//! so the same workdir can pair this binary with bench/electron-bench.mjs.
+//! so the two roles can run as separate processes (see bench/run.ps1).
 //! With BENCH_NO_LAN set, the local-network fast path is off (QUIC only).
 
 use std::path::PathBuf;

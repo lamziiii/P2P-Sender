@@ -55,6 +55,12 @@ jobs:
               status=1
             fi
           done
+          # A stable release says what it brings: the release page and the
+          # app (after the update) show this section of CHANGELOG.md.
+          if [[ "$tag" != *-* ]] && ! awk -v v="$tag" '$1 == "##" && $2 == v { found = 1 } END { exit !found }' CHANGELOG.md; then
+            echo "::error file=CHANGELOG.md::no section \"## $tag\" for this version"
+            status=1
+          fi
           exit $status
 
   build:
@@ -65,6 +71,9 @@ jobs:
         os: ${{ fromJSON(inputs.platforms || '["windows-latest", "macos-latest", "ubuntu-22.04"]') }}
 
     runs-on: ${{ matrix.os }}
+    env:
+      # Only given to version tags: it signs the updates (see update.rs).
+      UPDATER_KEY: ${{ startsWith(github.ref, 'refs/tags/v') && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
 
     steps:
       - name: Check out git repository
@@ -174,14 +183,43 @@ jobs:
         shell: bash
         run: cp signed-installer/*.exe src-tauri/target/release/bundle/nsis/
 
+      # What the app's updater downloads, each with its .sig: the installer
+      # (after SignPath, when signed), the AppImage, the app in a .tar.gz.
+      - name: Sign the update
+        if: env.UPDATER_KEY != ''
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          b=src-tauri/target/release/bundle
+          case "$RUNNER_OS" in
+            Windows) files=$(ls $b/nsis/*-setup.exe) ;;
+            Linux) files=$(ls $b/appimage/*.AppImage) ;;
+            macOS)
+              name=$(basename "$(ls $b/dmg/*.dmg)" .dmg)
+              # No ._ files for extended attributes: they would land in the
+              # installed app and break its signature.
+              COPYFILE_DISABLE=1 tar -C $b/macos -czf "$b/macos/$name.app.tar.gz" P2PShare.app
+              files="$b/macos/$name.app.tar.gz"
+              ;;
+          esac
+          # Bound to the version: the app refuses a signature of another one
+          # (requireSignedVersion), so an older release cannot pass for a new one.
+          for f in $files; do npx tauri signer sign --app-version "${GITHUB_REF_NAME#v}" "$f" > /dev/null; ls -l "$f.sig"; done
+
       - name: Upload installers
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: P2PShare-${{ matrix.os }}
           path: |
             src-tauri/target/release/bundle/nsis/*.exe
+            src-tauri/target/release/bundle/nsis/*.sig
             src-tauri/target/release/bundle/dmg/*.dmg
+            src-tauri/target/release/bundle/macos/*.app.tar.gz
+            src-tauri/target/release/bundle/macos/*.sig
             src-tauri/target/release/bundle/appimage/*.AppImage
+            src-tauri/target/release/bundle/appimage/*.sig
           if-no-files-found: error
 
   android:
@@ -273,11 +311,61 @@ jobs:
           pattern: P2PShare-*
           merge-multiple: true
 
+      - name: Check out the changelog
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          path: repo
+          sparse-checkout: CHANGELOG.md
+          sparse-checkout-cone-mode: false
+
+      # This version's section of CHANGELOG.md: on the release page, and in
+      # latest.json for the app to show before installing it.
+      - name: Write the release notes
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          python3 - <<'PY'
+          import os
+          version = os.environ['TAG'][1:]
+          lines, inside = [], False
+          for line in open('repo/CHANGELOG.md', encoding='utf-8'):
+              if line.startswith('## '):
+                  if inside:
+                      break
+                  inside = line[3:].split()[0] == version
+              elif inside:
+                  lines.append(line.rstrip())
+          open('notes.md', 'w', encoding='utf-8').write('\n'.join(lines).strip() + '\n')
+          PY
+          {
+            if grep -q . notes.md; then
+              echo '## Nouveautés'
+              echo
+              cat notes.md
+              echo
+            fi
+            cat <<'EOF'
+          ## Installation
+
+          Téléchargez l'installeur correspondant à votre système :
+
+          - **Windows** : `P2PShare_*_x64-setup.exe`
+          - **macOS** (Apple Silicon) : `P2PShare_*_aarch64.dmg`
+          - **Linux** : `P2PShare_*_amd64.AppImage`
+          - **Android** (arm64) : `P2PShare_*_android-arm64.apk`, si présent
+
+          Depuis la version 3.4.5, l'app se met à jour toute seule sur Windows, macOS et Linux (Paramètres → À propos). Depuis une version plus ancienne, installez celle-ci une fois à la main.
+
+          La version 3 n'échange pas avec les versions 2.x (Electron) : vos amis doivent aussi passer à la v3. Votre ID, vos amis et vos messages sont repris automatiquement.
+          EOF
+          } > release-body.md
+          cat release-body.md
+
       # Lets users check what they downloaded (only Windows can be signed).
       - name: Compute checksums
         run: |
           cd artifacts
-          find . -type f \( -name '*.exe' -o -name '*.dmg' -o -name '*.AppImage' -o -name '*.apk' \) -print0 |
+          find . -type f \( -name '*.exe' -o -name '*.dmg' -o -name '*.AppImage' -o -name '*.app.tar.gz' -o -name '*.apk' \) -print0 |
             while IFS= read -r -d '' f; do
               echo "$(sha256sum "$f" | cut -d' ' -f1)  $(basename "$f")"
             done > SHA256SUMS.txt
@@ -293,6 +381,40 @@ jobs:
             exit 1
           fi
 
+      # What the app's updater reads (see update.rs): a stable release must
+      # carry it, or apps would stay on the previous version.
+      - name: Write latest.json
+        if: ${{ !contains(github.ref_name, '-') }}
+        env:
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          python3 - <<'PY'
+          import glob, json, os, sys, datetime
+          tag, repo = os.environ['TAG'], os.environ['REPO']
+          platforms = {}
+          for target, pattern in [('windows-x86_64', '*-setup.exe'),
+                                  ('darwin-aarch64', '*.app.tar.gz'),
+                                  ('linux-x86_64', '*.AppImage')]:
+              found = glob.glob(f'artifacts/**/{pattern}', recursive=True)
+              if len(found) != 1 or not os.path.exists(found[0] + '.sig'):
+                  print(f'::error::No signed update for {target}: the TAURI_SIGNING_PRIVATE_KEY secret is not set?')
+                  sys.exit(1)
+              name = os.path.basename(found[0])
+              platforms[target] = {
+                  'signature': open(found[0] + '.sig').read().strip(),
+                  'url': f'https://github.com/{repo}/releases/download/{tag}/{name}',
+              }
+          latest = {
+              'version': tag[1:],
+              'notes': open('notes.md', encoding='utf-8').read().strip(),
+              'pub_date': datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
+              'platforms': platforms,
+          }
+          json.dump(latest, open('artifacts/latest.json', 'w'), indent=2)
+          print(json.dumps(latest, indent=2))
+          PY
+
       # The APK comes only with the release key set up.
       - name: List the release files
         id: files
@@ -303,6 +425,11 @@ jobs:
             echo 'artifacts/**/*.dmg'
             echo 'artifacts/**/*.AppImage'
             if [ -n "$(find artifacts -name '*.apk')" ]; then echo 'artifacts/**/*.apk'; fi
+            # latest.json comes after the release is complete (below).
+            if [ -f artifacts/latest.json ]; then
+              echo 'artifacts/**/*.app.tar.gz'
+              echo 'artifacts/**/*.sig'
+            fi
             echo 'artifacts/SHA256SUMS.txt'
             echo EOF
           } >> "$GITHUB_OUTPUT"
@@ -317,17 +444,15 @@ jobs:
           prerelease: ${{ contains(github.ref_name, '-') }}
           make_latest: ${{ !contains(github.ref_name, '-') }}
           generate_release_notes: true
-          body: |
-            ## Installation
+          body_path: release-body.md
 
-            Téléchargez l'installeur correspondant à votre système :
-
-            - **Windows** : `P2PShare_*_x64-setup.exe`
-            - **macOS** (Apple Silicon) : `P2PShare_*_aarch64.dmg`
-            - **Linux** : `P2PShare_*_amd64.AppImage`
-            - **Android** (arm64) : `P2PShare_*_android-arm64.apk`, si présent
-
-            La version 3 n'échange pas avec les versions 2.x (Electron) : vos amis doivent aussi passer à la v3. Votre ID, vos amis et vos messages sont repris automatiquement.
+      # Last, once every file is up: apps that read it find the installers.
+      - name: Publish latest.json
+        if: ${{ !contains(github.ref_name, '-') }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: gh release upload "$TAG" artifacts/latest.json --repo "$GITHUB_REPOSITORY"
 
   # Sends the new version to winget (see winget.yml); not a prerelease.
   winget:

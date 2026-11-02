@@ -1,13 +1,13 @@
 import { useState } from 'react';
 import { api } from './api';
 import type { Config } from './api';
-import { useRelayStatus } from './relay';
+import { useConnection } from './relay';
 
 // Self-hosted relay, for networks that block iroh's public relays (eduroam…).
 export function RelaySettings({ config }: { config: Partial<Config> }) {
   const [url, setUrl] = useState(config.relayUrl ?? '');
   const [token, setToken] = useState(config.relayToken ?? '');
-  const status = useRelayStatus();
+  const { status, connection } = useConnection();
   const [error, setError] = useState('');
   const [applying, setApplying] = useState(false);
 
@@ -41,8 +41,8 @@ export function RelaySettings({ config }: { config: Partial<Config> }) {
   };
 
   return (
-    <div className="card">
-      <div className="card-label">Relais personnel</div>
+    <div>
+      <div className="setting-label" style={{ marginBottom: 6 }}>Relais personnel</div>
       <input className="input" placeholder="https://relais.exemple.fr" value={url} onChange={e => setUrl(e.target.value)} spellCheck={false} />
       <input className="input" style={{ marginTop: 6 }} type="password" placeholder="Jeton (si le relais en demande un)" value={token} onChange={e => setToken(e.target.value)} spellCheck={false} />
       {error && <div className="error-text">{error}</div>}
@@ -58,13 +58,17 @@ export function RelaySettings({ config }: { config: Partial<Config> }) {
       </div>
       <div className="setting-sub" style={{ marginTop: 6 }}>
         {status === null
-          ? 'Connexion au relais…'
+          ? connection === 'blocked'
+            ? <span style={{ color: 'var(--danger)' }}>Aucun relais ne répond</span>
+            : 'Connexion au relais…'
           : status.connected
-            ? <span style={{ color: 'var(--success)' }}>Connecté à {status.custom ? 'votre relais' : 'un relais public'} ({host(status.url)})</span>
+            ? config.relayUrl && !status.custom
+              ? <span style={{ color: 'var(--warning)' }}>Votre relais ne répond pas : relais public en attendant ({host(status.url)})</span>
+              : <span style={{ color: 'var(--success)' }}>Connecté à {status.custom ? 'votre relais' : 'un relais public'} ({host(status.url)})</span>
             : <span style={{ color: 'var(--danger)' }}>Relais injoignable{status.error ? ` : ${status.error}` : ''}</span>}
       </div>
       <div className="setting-sub" style={{ marginTop: 6 }}>
-        Pour les réseaux qui bloquent les relais publics (eduroam…). Vos amis doivent indiquer le même relais.
+        Votre relais passe en premier : vos amis qui l’ont aussi échangent avec vous par lui, plus vite que par les relais publics. S’il ne répond pas, les relais publics prennent le relais. Sur un réseau qui bloque les relais publics (eduroam…), l’app les joint à travers votre relais : vos amis qui ne l’ont pas restent joignables.
       </div>
     </div>
   );

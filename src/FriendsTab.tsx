@@ -107,13 +107,12 @@ function RenameDialog({ friend, onDone }: { friend: Friend; onDone: (friends?: F
   );
 }
 
-export function FriendsTab({ friends, unread, dropTarget, myId, localsend, onFriends, onOpenChat, onSendFile, onSendFolder, onRemove, onLocalSendSent, onOpenLocalSendChat, mutedFriends, onMuted }: {
+export function FriendsTab({ friends, unread, dropTarget, myId, onFriends, onOpenChat, onSendFile, onSendFolder, onRemove, onLocalSendSent, onOpenLocalSendChat, mutedFriends, onMuted }: {
   friends: Friend[];
   unread: Unread;
   // Where files dragged over the window would go.
   dropTarget: DropTarget | null;
   myId: string;
-  localsend: boolean;
   onFriends: (friends: Friend[]) => void;
   onOpenChat: (id: string) => void;
   onSendFile: (id: string) => void;
@@ -272,13 +271,11 @@ export function FriendsTab({ friends, unread, dropTarget, myId, localsend, onFri
       )}
       {query && shown.length === 0 && <div className="setting-sub" style={{ textAlign: 'center' }}>Aucun ami ne correspond.</div>}
 
-      {localsend && (
-        <LocalSendDevices
-          dropTarget={dropTarget?.kind === 'localsend' ? dropTarget.id : null}
-          onSent={onLocalSendSent}
-          onOpenChat={onOpenLocalSendChat}
-        />
-      )}
+      <LocalSendDevices
+        dropTarget={dropTarget?.kind === 'localsend' ? dropTarget.id : null}
+        onSent={onLocalSendSent}
+        onOpenChat={onOpenLocalSendChat}
+      />
 
       {renaming && (
         <RenameDialog

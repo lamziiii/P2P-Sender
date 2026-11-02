@@ -14,6 +14,8 @@ export type Friend = {
   lastMine: boolean;
   // Their offers are accepted without asking, except programs.
   autoAccept: boolean;
+  // While online, how the connection goes.
+  route?: Route;
 };
 
 // An image sent or offered in the chat (the message id is the transfer's).
@@ -44,6 +46,10 @@ export type TransferStatus =
 export type TransferFolder = { id: string; name: string; files: number; size: number; root?: string };
 
 export type Route = 'lan' | 'direct' | 'relay';
+
+// A newer version of the app; failed: its install failed already (the old
+// version restarted), it only installs when asked.
+export type UpdateInfo = { version: string; notes?: string; failed: boolean };
 
 export type Transfer = {
   id: string;
@@ -85,7 +91,8 @@ export type Config = {
   nickname: string;
   relayUrl: string;
   relayToken: string;
-  localsend: boolean;
+  // Desktop: newer versions install by themselves.
+  autoUpdate?: boolean;
   // The first-launch welcome was shown.
   welcomed: boolean;
   // Do not disturb until then (unix ms); 0 off, from DND_FOREVER until turned off.
@@ -339,10 +346,21 @@ export const api = {
   getRelayStatus: () => invoke<RelayStatus | null>('get_relay_status'),
   // The relay status changed (same payload as getRelayStatus).
   onRelayStatus: on<RelayStatus | null>('relay-status'),
+  // Updates (desktop; on Android nothing is found, see Update.tsx).
+  getUpdate: () => invoke<UpdateInfo | null>('get_update'),
+  // Errors are French messages.
+  checkUpdate: () => invoke<UpdateInfo | null>('check_update'),
+  // Saves everything, installs and restarts; rejects with a French message.
+  installUpdate: () => invoke<void>('install_update'),
+  // Install newer versions by themselves, once no transfer runs.
+  setAutoUpdate: (enable: boolean) => invoke<boolean>('set_auto_update', { enable }),
+  onUpdateAvailable: on<UpdateInfo>('update-available'),
+  onUpdateProgress: on<{ done: number; total: number | null }>('update-progress'),
+  // A download failed (French message), also when it started by itself.
+  onUpdateError: on<string>('update-error'),
   // Restarts the app when the setting changes.
   setRelay: (url: string, token: string) => invoke<void>('set_relay', { url, token }),
   getLocalSendStatus: () => invoke<LocalSendStatus>('get_localsend_status'),
-  setLocalSend: (enable: boolean) => invoke<LocalSendStatus>('set_localsend', { enable }),
   getLocalSendChats: () => invoke<LocalSendChat[]>('get_localsend_chats'),
   getLocalSendChat: (fingerprint: string) =>
     invoke<{ alias: string; messages: LocalSendMessage[] }>('get_localsend_chat', { fingerprint }),
@@ -407,6 +425,7 @@ export const api = {
 
   // UI / presence
   onFriendStatus: on<{ friendId: string; online: boolean }>('friend-status'),
+  onFriendRoute: on<{ friendId: string; route: Route | null }>('friend-route'),
 
   // Files dragged over the window, from the file explorer. Positions are in
   // physical pixels from the window's top left.

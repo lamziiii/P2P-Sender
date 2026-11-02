@@ -5,7 +5,7 @@ import type { ChatMessage, Friend } from './api';
 import { ChatImage } from './ChatImage';
 import { BubbleActions, ChatInput, ChatSearch, PendingMark } from './chatParts';
 import { chatRows } from './chatRows';
-import { folderSendError, formatTime, plural } from './format';
+import { folderSendError, formatTime, plural, RELAY_HINT, ROUTE_LABELS } from './format';
 import { Avatar } from './FriendsTab';
 import { Icon } from './icons';
 import { WindowButtons } from './PinButton';
@@ -321,8 +321,13 @@ export function FriendChatView({ friend, myId, messages, typing, notices, offers
             {typing
               ? <div className="subtitle typing">En train d’écrire…</div>
               : (
-                <div className={`subtitle ${friend.online ? 'online' : ''}`}>
-                  {friend.online ? 'En ligne · chiffré de bout en bout' : 'Hors ligne · vos messages partiront à sa reconnexion'}
+                <div
+                  className={`subtitle ${friend.online ? 'online' : ''}`}
+                  title={friend.online && friend.route === 'relay' ? RELAY_HINT : undefined}
+                >
+                  {friend.online
+                    ? `En ligne${friend.route ? ` · ${ROUTE_LABELS[friend.route]}` : ''} · chiffré de bout en bout`
+                    : 'Hors ligne · vos messages partiront à sa reconnexion'}
                 </div>
               )}
           </div>

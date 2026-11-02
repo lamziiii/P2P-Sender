@@ -526,10 +526,6 @@ impl Log {
         }
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
-    }
-
     fn kept(&self, author: &str, n: u64) -> Option<&Kept> {
         let i = usize::try_from(n.checked_sub(1)?).ok()?;
         self.entries.get(author)?.get(i)
@@ -848,6 +844,7 @@ impl Log {
     }
 
     /// Whether `have` is missing anything we have.
+    #[cfg(test)]
     pub fn is_behind(&self, have: &Have) -> bool {
         self.entries
             .iter()

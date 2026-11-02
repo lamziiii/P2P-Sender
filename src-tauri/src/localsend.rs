@@ -384,6 +384,17 @@ struct DeviceInfo {
     protocol: Option<String>,
     #[serde(default)]
     announce: Option<bool>,
+    /// Ours only (other apps ignore it): see `P2pHint`.
+    #[serde(default)]
+    p2pshare: Option<P2pHint>,
+}
+
+/// The P2P ID and QUIC port of a P2P Share device, so that friends on the
+/// same network connect even when relays are unreachable.
+#[derive(Deserialize)]
+struct P2pHint {
+    id: String,
+    port: u16,
 }
 
 #[derive(Deserialize)]
@@ -1091,6 +1102,9 @@ impl Inner {
         port: u16,
         https: bool,
     ) {
+        if let Some(hint) = &info.p2pshare {
+            self.node.nearby_peer(&hint.id, SocketAddr::new(ip, hint.port));
+        }
         let verified = cert.is_some();
         let fingerprint = match cert {
             // A claim the certificate contradicts is not trusted.
@@ -1225,14 +1239,18 @@ impl Inner {
 
     /// What `info` and `register` answer.
     fn info(&self) -> Value {
-        json!({
+        let mut info = json!({
             "alias": *self.alias(),
             "version": VERSION,
             "deviceModel": device_model(),
             "deviceType": "desktop",
             "fingerprint": self.fingerprint,
             "download": false,
-        })
+        });
+        if let Some((id, port)) = self.node.nearby_hint() {
+            info["p2pshare"] = json!({ "id": id, "port": port });
+        }
+        info
     }
 
     /// What we tell other devices in announcements and registrations.

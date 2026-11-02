@@ -96,14 +96,13 @@ export function BackupDialog({ mode, includeChats = false, onClose, onExported }
 }
 
 // Settings: export or restore the whole app.
-export function BackupCard() {
+export function BackupRow() {
   const [includeChats, setIncludeChats] = useState(true);
   const [dialog, setDialog] = useState<'export' | 'import' | null>(null);
   const [saved, setSaved] = useState('');
 
   return (
-    <div className="card stack">
-      <div className="card-label" style={{ marginBottom: 0 }}>Sauvegarde</div>
+    <div className="stack">
       <div className="setting-sub">
         Votre identité, vos amis, vos groupes et vos réglages dans un fichier chiffré, pour les retrouver sur un autre {byPlatform('ordinateur', 'appareil')}.
       </div>

@@ -2,6 +2,7 @@ import { useCallback, useState, useEffect, useRef } from 'react';
 import type { ReactNode } from 'react';
 import { api } from './api';
 import type { ChatMessage, Config, DropTarget, Friend, GroupsOverview, OpenChat, Transfer } from './api';
+import { ChangelogDialog } from './Changelog';
 import { DndButton } from './Dnd';
 import { FINAL, folderErrors, folderSendError, formatBytes, plural, RELAY_HINT, ROUTE_LABELS } from './format';
 import { FriendChatView } from './FriendChat';
@@ -12,38 +13,23 @@ import { Icon } from './icons';
 import { WindowButtons } from './PinButton';
 import { LocalSendChatView } from './LocalSendChat';
 import { isMobile, useBackButton } from './platform';
-import { useRelayStatus } from './relay';
+import { useConnection } from './relay';
+import { newsToShow, RELEASES } from './releaseNotes';
 import { SettingsTab } from './SettingsTab';
 import type { Theme } from './SettingsTab';
 import { TransfersTab } from './TransfersTab';
+import { UpdateBanner } from './Update';
 import { transferStore, useOffers, useRunning, useTransfers } from './transferStore';
 import { Welcome } from './Welcome';
 
 // Shown in the chat with a preview (same list as the backend's).
 const IMAGE_EXT = /\.(jpe?g|png|gif|webp|bmp)$/i;
-// How long the relay may take to answer at start before the network counts as blocked.
-const CONNECT_GRACE = 15_000;
 // Longest last message shown in the friend list (as the backend cuts it).
 const PREVIEW_CHARS = 120;
 // How long "typing" shows without news from the friend.
 const TYPING_SHOWN = 5000;
 // Transfer updates shown together within that many ms.
 const UPDATE_BATCH = 100;
-
-type Connection = 'connecting' | 'online' | 'blocked';
-
-// Whether we reach the network: through the relay, which every connection
-// between friends starts with.
-function useConnection(): Connection {
-  const status = useRelayStatus();
-  const [late, setLate] = useState(false);
-  useEffect(() => {
-    const grace = setTimeout(() => setLate(true), CONNECT_GRACE);
-    return () => clearTimeout(grace);
-  }, []);
-  if (status?.connected) return 'online';
-  return late || status?.error ? 'blocked' : 'connecting';
-}
 
 // Running transfers, seen from every tab but their own. Renders on its own
 // when their progress changes.
@@ -98,6 +84,8 @@ function App() {
   const [unread, setUnread] = useState<Unread>({});
   // First launch: the welcome comes before everything else.
   const [welcome, setWelcome] = useState(false);
+  // Just updated: what the new version brings, shown once.
+  const [news, setNews] = useState(false);
   // Friend whose removal waits for confirmation.
   const [removing, setRemoving] = useState<Friend | null>(null);
   // Files dragged over the window, and where they would go.
@@ -112,7 +100,7 @@ function App() {
   const [theme, setTheme] = useState<Theme>(
     () => (localStorage.getItem('theme') as Theme | null) ?? 'system'
   );
-  const connection = useConnection();
+  const { connection } = useConnection();
   // Mobile: the back button leaves the chats, groups and settings.
   useBackButton(!welcome && ['chat', 'group', 'localsend', 'settings'].includes(activeTab));
   const chatFriendIdRef = useRef<string | null>(null);
@@ -316,6 +304,7 @@ function App() {
       setConfig(c);
       setNickname(c.nickname);
       setWelcome(!c.welcomed);
+      if (newsToShow(c.welcomed)) setNews(true);
     });
     loadGroups();
     api.getTransfers().then(list => transferStore.update(prev => {
@@ -435,8 +424,11 @@ function App() {
         dropPaths(target, e.paths);
       }),
       api.onFriendStatus(({ friendId, online }) => {
-        setFriends(prev => prev.map(f => (f.id === friendId ? { ...f, online } : f)));
+        setFriends(prev => prev.map(f => (f.id === friendId ? { ...f, online, route: online ? f.route : undefined } : f)));
         loadGroups();
+      }),
+      api.onFriendRoute(({ friendId, route }) => {
+        setFriends(prev => prev.map(f => (f.id === friendId ? { ...f, route: route ?? undefined } : f)));
       }),
     ];
 
@@ -600,6 +592,13 @@ function App() {
     <>
       {dragging && <div className={`drop-hint ${dropTarget ? 'ready' : ''}`}>{dropHint()}</div>}
       {toast && !dragging && <div className="toast">{toast}</div>}
+      {news && (
+        <ChangelogDialog
+          title={`Nouveautés de la version ${__APP_VERSION__}`}
+          releases={RELEASES.filter(r => r.version === __APP_VERSION__)}
+          onClose={() => setNews(false)}
+        />
+      )}
       {removing && (
         <div className="modal-backdrop" onClick={() => setRemoving(null)}>
           <div className="modal" role="dialog" aria-modal="true" onClick={e => e.stopPropagation()}>
@@ -697,11 +696,22 @@ function App() {
   }
 
   /* ─── Main View ─── */
+  // Relays blocked, friends on the same network may still be online.
+  const shown = connection === 'blocked' && friends.some(f => f.online) ? 'local' : connection;
   const status = {
-    online: { label: 'Connecté', className: 'online' },
-    connecting: { label: 'Connexion au réseau…', className: '' },
-    blocked: { label: 'Réseau bloqué : relais injoignable', className: 'danger' },
-  }[connection];
+    online: { label: 'Connecté', className: 'online', hint: '' },
+    connecting: { label: 'Connexion au réseau…', className: '', hint: '' },
+    local: {
+      label: 'Réseau local uniquement',
+      className: 'warning',
+      hint: 'Les relais ne répondent pas : seuls vos amis sur le même réseau sont joignables. Ouvrir les réglages réseau.',
+    },
+    blocked: {
+      label: 'Relais injoignables',
+      className: 'danger',
+      hint: 'Les relais ne répondent pas : vos amis ne sont joignables que sur le même réseau. Ouvrir les réglages réseau.',
+    },
+  }[shown];
   return withOverlays(
     <div className="app">
       {/* Header */}
@@ -712,13 +722,13 @@ function App() {
             <div className="title">P2P Share</div>
             {connection === 'blocked'
               ? (
-                <button className={`subtitle status-line link-title ${status.className}`} title="Ouvrir les réglages réseau" onClick={() => openSettings(true)}>
-                  <Icon name="alert" size={11} /> {status.label}
+                <button className={`subtitle status-line link-title ${status.className}`} title={status.hint} onClick={() => openSettings(true)}>
+                  <Icon name="alert" size={11} /><span className="ellipsis">{status.label}</span>
                 </button>
               )
               : (
                 <div className={`subtitle status-line ${status.className}`}>
-                  <span className={`status-dot ${connection}`} /> {status.label}
+                  <span className={`status-dot ${connection}`} /><span className="ellipsis">{status.label}</span>
                 </div>
               )}
           </div>
@@ -747,6 +757,7 @@ function App() {
       )}
 
       <div className="content">
+        {tab === 'friends' && <UpdateBanner />}
         {tab !== 'settings' && offerBanners}
         {tab !== 'friends' && tab !== 'settings' && messageBanners}
 
@@ -756,7 +767,6 @@ function App() {
             unread={unread}
             dropTarget={dropTarget}
             myId={myId}
-            localsend={config.localsend ?? false}
             onFriends={setFriends}
             onOpenChat={openChatWith}
             onSendFile={sendFile}

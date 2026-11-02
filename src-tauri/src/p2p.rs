@@ -25,17 +25,16 @@ mod chats;
 mod external;
 mod groups;
 mod lan;
+mod tunnel;
 
 pub use external::{ExternalFile, OutgoingFile};
 
-pub use groups::{
-    GroupDetail, GroupFileView, GroupMessageView, GroupSummary, GroupsOverview, InviteView,
-    MemberView,
-};
+pub use groups::{GroupDetail, GroupFileView, GroupMessageView, GroupsOverview};
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
+use std::net::SocketAddr;
 use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -45,8 +44,12 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
 use iroh::endpoint::{presets, Connection, QuicTransportConfig, RecvStream, SendStream, VarInt};
-use iroh::address_lookup::{PkarrPublisher, PkarrResolver};
-use iroh::{Endpoint, PublicKey, RelayConfig, RelayMap, RelayMode, RelayUrl, SecretKey, Watcher};
+use iroh::address_lookup::{MemoryLookup, PkarrPublisher, PkarrResolver};
+use n0_future::StreamExt;
+use iroh::{
+    Endpoint, EndpointAddr, PublicKey, RelayConfig, RelayMap, RelayMode, RelayUrl, SecretKey,
+    TransportAddr, Watcher,
+};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -70,7 +73,16 @@ const MAX_LARGE_BUFFERS: usize = 8;
 const MAX_FRAME: usize = 256 * 1024;
 
 const DIAL_TIMEOUT: Duration = Duration::from_secs(15);
+/// A friend seen on our local network answers fast, or not there.
+const NEARBY_DIAL_TIMEOUT: Duration = Duration::from_secs(5);
 const ONLINE_TIMEOUT: Duration = Duration::from_secs(15);
+/// Our own relay not our home relay for that long: the public relays stand
+/// in for it (see `Node::watch_relay`).
+const RELAY_FALLBACK: Duration = Duration::from_secs(20);
+/// Meanwhile, how often to look whether ours answers again.
+const RELAY_RETRY: Duration = Duration::from_secs(60);
+const ECONOMY_RELAY_RETRY: Duration = Duration::from_secs(5 * 60);
+const RELAY_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 /// A peer that went offline is dialed again after that long; also how
 /// often unacknowledged chats are sent again, and groups that differ from
@@ -239,8 +251,9 @@ impl Friend {
     }
 }
 
-/// A self-hosted relay (see the P2P-Sender-relay project), used instead of
-/// iroh's public relays on networks that block them.
+/// A self-hosted relay (see the P2P-Sender-relay project): our home relay
+/// whenever it answers, and our way to iroh's public relays on networks
+/// that block them (see `tunnel.rs`).
 #[derive(Clone)]
 pub struct CustomRelay {
     pub url: RelayUrl,
@@ -286,12 +299,68 @@ impl CustomRelay {
     }
 }
 
+/// Whether a relay answers its probe (`/ping`), over HTTPS checked against
+/// the public certificate authorities, as iroh reaches it.
+async fn relay_answers(url: &url::Url) -> bool {
+    let (Some(host), Some(port)) = (url.host_str().map(str::to_string), url.port_or_known_default())
+    else {
+        return false;
+    };
+    let probe = async {
+        let tcp = tokio::net::TcpStream::connect((host.as_str(), port)).await.ok()?;
+        if url.scheme() != "https" {
+            return ping(tcp, &host).await;
+        }
+        let mut roots = rustls::RootCertStore::empty();
+        roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        let config = rustls::ClientConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .ok()?
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+        let name = rustls::pki_types::ServerName::try_from(host.clone()).ok()?;
+        let tls = tokio_rustls::TlsConnector::from(Arc::new(config))
+            .connect(name, tcp)
+            .await
+            .ok()?;
+        ping(tls, &host).await
+    };
+    tokio::time::timeout(RELAY_PROBE_TIMEOUT, probe)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(false)
+}
+
+async fn ping<T>(io: T, host: &str) -> Option<bool>
+where
+    T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    let (mut sender, conn) =
+        hyper::client::conn::http1::handshake(hyper_util::rt::TokioIo::new(io))
+            .await
+            .ok()?;
+    let req = hyper::Request::get("/ping")
+        .header(hyper::header::HOST, host)
+        .body(http_body_util::Empty::<Bytes>::new())
+        .ok()?;
+    // The sender is dropped with the exchange, which lets the connection end.
+    let exchange = async move { sender.send_request(req).await.map(|r| r.status().is_success()) };
+    let (answered, _) = tokio::join!(exchange, conn);
+    answered.ok()
+}
+
 #[derive(Clone, PartialEq, Serialize)]
 pub struct RelayStatusView {
     pub url: String,
     pub custom: bool,
     pub connected: bool,
     pub error: Option<String>,
+    /// The relay refused our token.
+    #[serde(skip)]
+    pub denied: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -308,6 +377,9 @@ pub struct FriendView {
     pub last_mine: bool,
     /// Their offers are accepted without asking, except programs.
     pub auto_accept: bool,
+    /// While online, how the connection goes: "lan", "direct" or "relay".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub route: Option<&'static str>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Debug)]
@@ -482,6 +554,11 @@ pub enum Event {
     FriendStatus {
         friend_id: String,
         online: bool,
+    },
+    /// The way the connection to a friend goes changed (see `FriendView`).
+    FriendRoute {
+        friend_id: String,
+        route: Option<&'static str>,
     },
     Message {
         friend_id: String,
@@ -781,6 +858,8 @@ struct Conn {
     queued: Arc<AtomicU64>,
     since: Instant,
     outgoing: bool,
+    /// See `FriendView::route`.
+    route: Option<&'static str>,
 }
 
 impl Conn {
@@ -869,6 +948,9 @@ struct State {
     groups_dir: PathBuf,
     conns: HashMap<String, Conn>,
     dialing: HashSet<String>,
+    /// Friends being dialed at the address they announced on our local
+    /// network (see `nearby_peer`), alongside any usual dial.
+    nearby_dialing: HashSet<String>,
     fast_retries: HashMap<String, u8>,
     /// Offline peers we may talk to: when to dial them next.
     backoff: HashMap<String, Backoff>,
@@ -1127,17 +1209,14 @@ impl State {
         self.events.push(Event::Transfer(view));
     }
 
-    /// `Transfer::view`, with the way its bytes go while it runs.
+    /// `Transfer::view`, with the way its bytes go while it runs: the local
+    /// network fast path, or the friend's connection (see `FriendView`).
     fn transfer_view(&self, t: &Transfer) -> TransferView {
         let mut view = t.view();
         view.route = if view.lan {
             Some("lan")
         } else if t.status.is_active() {
-            self.conns.get(&t.friend_id).and_then(|c| {
-                let paths = c.conn.paths();
-                let selected = paths.iter().find(|p| p.is_selected())?;
-                Some(if selected.is_relay() { "relay" } else { "direct" })
-            })
+            self.conns.get(&t.friend_id).and_then(|c| c.route)
         } else {
             None
         };
@@ -1727,8 +1806,14 @@ struct Inner {
     rt: Handle,
     download_dir: Arc<dyn Fn() -> PathBuf + Send + Sync>,
     on_event: Arc<dyn Fn(Event) + Send + Sync>,
-    custom_relay: bool,
+    /// Our own relay, if set.
+    custom_relay: Option<RelayUrl>,
+    /// Addresses of friends seen on our local network (LocalSend
+    /// announcements), so that they are reached without relay or internet.
+    nearby: MemoryLookup,
     lan: Option<lan::Lan>,
+    /// With our own relay: the way to iroh's public relays (see `tunnel.rs`).
+    tunnel: Option<Arc<tunnel::Tunnel>>,
     /// Permits for a receiving stream's `DISK_BUFFER`.
     large_buffers: Arc<tokio::sync::Semaphore>,
     /// The computer is going to sleep: no dialing until `resume`.
@@ -1761,11 +1846,47 @@ impl Node {
             .secret_key(opts.secret)
             .alpns(vec![ALPN.to_vec()])
             .transport_config(transport);
-        let custom_relay = opts.relay.is_some();
+        let custom_relay = opts.relay.as_ref().map(|r| r.url.clone());
+        // Tests only: as on a network that blocks iroh's relays and
+        // directory, peers can only find each other on the local network.
+        if std::env::var_os("P2PSHARE_NO_INTERNET").is_some() {
+            builder = builder.relay_mode(RelayMode::Disabled).clear_address_lookup();
+        }
+        // Tests only: no direct path, everything goes through a relay.
+        if std::env::var_os("P2PSHARE_RELAY_ONLY").is_some() {
+            builder = builder.clear_ip_transports();
+        }
+        // Tests only: as on a network that blocks iroh's relays and
+        // directory but not our relay (see `tunnel.rs`).
+        if std::env::var_os("P2PSHARE_BLOCK_PUBLIC").is_some() {
+            builder = builder.clear_address_lookup();
+        }
+        // Every relay reached through our proxy: directly, or through ours
+        // where the network blocks it.
+        let tunnel = match &opts.relay {
+            Some(relay) => match tunnel::Tunnel::start(relay.clone(), &Handle::current()).await {
+                Ok((tunnel, proxy)) => {
+                    builder = builder.proxy_url(proxy);
+                    Some(tunnel)
+                }
+                Err(e) => {
+                    eprintln!("tunnel unavailable: {e}");
+                    None
+                }
+            },
+            None => None,
+        };
+        let nearby = MemoryLookup::new();
+        builder = builder.address_lookup(nearby.clone());
         if let Some(relay) = &opts.relay {
-            // Our relay becomes our only home relay, so friends always reach
-            // us through it; we still publish to and look up in iroh's public
-            // directory (kept by the preset) as well as the relay's own.
+            // Our relay alone: it is our home relay whenever it answers, so
+            // friends who use it too exchange with us through it, faster than
+            // through the shared public relays. Friends elsewhere are still
+            // reached on their own relays (iroh goes to any relay a peer is
+            // on, and answers through the one it heard from). While ours does
+            // not answer, the public relays stand in (see `watch_relay`). We
+            // publish to and look up in iroh's public directory (kept by the
+            // preset) as well as the relay's own.
             let mut config = RelayConfig::new(relay.url.clone(), None);
             if let Some(token) = &relay.token {
                 config = config.with_auth_token(token.clone());
@@ -1805,6 +1926,7 @@ impl Node {
             groups_dir: opts.groups_dir,
             conns: HashMap::new(),
             dialing: HashSet::new(),
+            nearby_dialing: HashSet::new(),
             fast_retries: HashMap::new(),
             backoff: HashMap::new(),
             reconnected_all: None,
@@ -1835,7 +1957,9 @@ impl Node {
             download_dir: opts.download_dir,
             on_event: opts.on_event,
             custom_relay,
+            nearby,
             lan,
+            tunnel,
             large_buffers: Arc::new(tokio::sync::Semaphore::new(MAX_LARGE_BUFFERS)),
             suspended: AtomicBool::new(false),
             economy: AtomicBool::new(false),
@@ -1914,19 +2038,29 @@ impl Node {
         };
         Some(RelayStatusView {
             url: home.url().to_string(),
-            custom: self.0.custom_relay,
+            custom: self.0.custom_relay.as_ref() == Some(home.url()),
             connected: home.is_connected(),
             error,
+            denied: home.auth_denied_reason().is_some(),
         })
     }
 
     /// Tell the UI each change of our home relay. Once it reconnects after
     /// being lost, the network is back: offline peers are dialed right away.
+    /// With our own relay: past `RELAY_FALLBACK` without it as our home
+    /// relay, the public relays are added; once it answers again (checked
+    /// every `RELAY_RETRY`), they are taken away and ours comes back.
     async fn watch_relay(self) {
         let mut watcher = self.0.endpoint.home_relay_status();
         let mut last = None;
         let mut was_connected = false;
         let mut lost = false;
+        // Since when our relay is not our home relay; when the public relays
+        // were added, or ours last checked since. Refused by ours (wrong
+        // token, which only changes with a restart): no going back to it.
+        let mut off_ours = Some(Instant::now());
+        let mut public_since: Option<Instant> = None;
+        let mut denied = false;
         loop {
             let status = self.relay_status();
             let connected = status.as_ref().is_some_and(|r| r.connected);
@@ -1939,10 +2073,71 @@ impl Node {
             was_connected = connected;
             if status != last {
                 last = status.clone();
-                (self.0.on_event)(Event::RelayStatus(status));
+                (self.0.on_event)(Event::RelayStatus(status.clone()));
             }
-            if watcher.updated().await.is_err() || self.0.endpoint.is_closed() {
-                return;
+            let mut deadline = None;
+            if self.0.custom_relay.is_some() {
+                denied |= status.as_ref().is_some_and(|r| r.custom && r.denied);
+                if status.as_ref().is_some_and(|r| r.connected && r.custom) {
+                    off_ours = None;
+                    if public_since.take().is_some() {
+                        self.public_relays(false).await;
+                    }
+                } else if !(denied && public_since.is_some()) {
+                    let since = *off_ours.get_or_insert_with(Instant::now);
+                    deadline = Some(match public_since {
+                        None => since + RELAY_FALLBACK,
+                        Some(t) => t + self.relay_retry(),
+                    });
+                }
+            }
+            tokio::select! {
+                changed = watcher.updated() => {
+                    if changed.is_err() || self.0.endpoint.is_closed() {
+                        return;
+                    }
+                }
+                _ = tokio::time::sleep_until(deadline.unwrap_or_else(Instant::now).into()), if deadline.is_some() => {
+                    if self.0.endpoint.is_closed() {
+                        return;
+                    }
+                    match (public_since, &self.0.custom_relay) {
+                        (None, _) => {
+                            self.public_relays(true).await;
+                            public_since = Some(Instant::now());
+                        }
+                        (Some(_), Some(ours)) if relay_answers(&url::Url::from(ours.clone())).await => {
+                            // Ours alone again: if iroh cannot reach it
+                            // after all, the public relays come back.
+                            self.public_relays(false).await;
+                            public_since = None;
+                            off_ours = Some(Instant::now());
+                        }
+                        _ => public_since = Some(Instant::now()),
+                    }
+                }
+            }
+        }
+    }
+
+    fn relay_retry(&self) -> Duration {
+        if self.0.economy.load(Ordering::Relaxed) {
+            ECONOMY_RELAY_RETRY
+        } else {
+            RELAY_RETRY
+        }
+    }
+
+    /// Add iroh's public relays next to our own, or take them away.
+    async fn public_relays(&self, add: bool) {
+        let public = iroh::defaults::prod::default_relay_map();
+        for url in public.urls::<Vec<_>>() {
+            if add {
+                if let Some(config) = public.get(&url) {
+                    self.0.endpoint.insert_relay(url, config).await;
+                }
+            } else {
+                self.0.endpoint.remove_relay(&url).await;
             }
         }
     }
@@ -2322,6 +2517,9 @@ impl Node {
     /// new address): iroh looks for new paths, offline peers are dialed
     /// again right away and peers learn our new local addresses.
     pub fn network_changed(&self) {
+        if let Some(tunnel) = &self.0.tunnel {
+            tunnel.network_changed();
+        }
         let node = self.clone();
         self.spawn(async move {
             node.0.endpoint.network_change().await;
@@ -2434,6 +2632,63 @@ impl Node {
             }
             friend_views(s)
         })
+    }
+
+    /// Our P2P ID and QUIC port, for the LocalSend announcements.
+    pub fn nearby_hint(&self) -> Option<(String, u16)> {
+        let port = self
+            .0
+            .endpoint
+            .bound_sockets()
+            .iter()
+            .find(|a| a.is_ipv4())?
+            .port();
+        Some((self.0.endpoint.id().to_string(), port))
+    }
+
+    /// A device on our local network announced this P2P ID at `addr`: if
+    /// it is a friend, iroh may reach it there, and an offline friend is
+    /// dialed now. The key checks who answers, so a false claim only fails.
+    pub fn nearby_peer(&self, id: &str, addr: SocketAddr) {
+        let Ok(key) = PublicKey::from_str(id) else {
+            return;
+        };
+        if addr.port() < 1024 || key == self.0.endpoint.id() {
+            return;
+        }
+        self.with(|s| {
+            if !s.is_allowed(id) {
+                return;
+            }
+            let here = EndpointAddr::from_parts(key, [TransportAddr::Ip(addr)]);
+            self.0.nearby.set_endpoint_info(here.clone());
+            if s.conns.contains_key(id) {
+                return;
+            }
+            // A dial under way may be waiting on unreachable relays, without
+            // this address: try it right away as well.
+            if s.dialing.contains(id) {
+                self.dial_nearby(s, id, here);
+            } else {
+                self.dial(s, id);
+            }
+        });
+    }
+
+    fn dial_nearby(&self, s: &mut State, friend_id: &str, addr: EndpointAddr) {
+        if self.0.suspended.load(Ordering::Relaxed) || !s.nearby_dialing.insert(friend_id.to_string()) {
+            return;
+        }
+        let node = self.clone();
+        let friend_id = friend_id.to_string();
+        self.spawn(async move {
+            if let Ok(Ok(conn)) =
+                tokio::time::timeout(NEARBY_DIAL_TIMEOUT, node.0.endpoint.connect(addr, ALPN)).await
+            {
+                node.clone().setup(conn, true).await;
+            }
+            node.with(|s| s.nearby_dialing.remove(&friend_id));
+        });
     }
 
     /// Dial a peer we have something for right away; if it stays offline,
@@ -2586,6 +2841,29 @@ impl Node {
             watched.closed().await;
             node.with(|s| node.on_close(s, &fid, id));
         });
+        // Tell the UI how the connection goes, each time iroh changes path.
+        let node = self.clone();
+        let watched = conn.clone();
+        let fid = friend_id.clone();
+        self.spawn(async move {
+            let mut paths = watched.paths_stream();
+            while let Some(list) = paths.next().await {
+                let route = lan::path_route(&list);
+                drop(list);
+                node.with(|s| {
+                    let Some(c) = s.conns.get_mut(&fid).filter(|c| c.id == id) else {
+                        return;
+                    };
+                    if c.route != route {
+                        c.route = route;
+                        s.events.push(Event::FriendRoute {
+                            friend_id: fid.clone(),
+                            route,
+                        });
+                    }
+                });
+            }
+        });
 
         s.fast_retries.remove(&friend_id);
         s.backoff.remove(&friend_id);
@@ -2599,6 +2877,7 @@ impl Node {
                 queued,
                 since: Instant::now(),
                 outgoing,
+                route: None,
             },
         );
         if !was_online {
@@ -4462,6 +4741,7 @@ fn friend_views(s: &State) -> Vec<FriendView> {
                 last_ts: last.map_or(0, |m| m.ts),
                 last_mine: last.is_some_and(|m| m.from == s.me),
                 auto_accept: f.auto_accept,
+                route: s.conns.get(&f.id).and_then(|c| c.route),
             }
         })
         .collect()

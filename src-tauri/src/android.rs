@@ -116,8 +116,8 @@ pub fn notify(title: &str, body: &str, chat: Option<(&str, &str)>) {
     );
 }
 
-pub fn set_multicast(enabled: bool) {
-    call_unit("setMulticast", json!({ "enabled": enabled }));
+pub fn hold_multicast() {
+    call_unit("holdMulticast", json!({}));
 }
 
 /// Where received files go: Download/P2PShare if it can be written, else

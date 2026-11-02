@@ -5,6 +5,9 @@ import type { MouseEvent, TouchEvent } from 'react';
 // Everything that differs from the desktop flyout depends on this.
 export const isMobile = /Android|iPhone|iPad/i.test(navigator.userAgent);
 
+// macOS: a menu bar instead of a notification area.
+export const isMac = !isMobile && /Macintosh|Mac OS X/i.test(navigator.userAgent);
+
 // The same sentence for the desktop or the phone.
 export const byPlatform = <T>(desktop: T, mobile: T): T => (isMobile ? mobile : desktop);
 

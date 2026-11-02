@@ -35,6 +35,19 @@ The installers are not signed yet: Windows SmartScreen may ask you to confirm, a
 - **Self-hosted relay**: for networks that block iroh's public relays.
 - **Tray app**: Windows 11 (Fluent) look, dark and light themes, clickable notifications, optional start with the computer (hidden in the tray).
 
+The full list of changes, for users and in French, is in [CHANGELOG.md](CHANGELOG.md); the app shows it after each update and in Settings → À propos.
+
+## What's new in 3.4.5
+
+- **Automatic updates** on Windows, macOS and Linux: the app finds new versions by itself, offers them over the friend list and in Settings → À propos (with a check button), and can install them on its own once no transfer runs. Only files signed with the project's key are installed. Android links to the releases page instead.
+- **Friends on the same network without the internet**: the app announces itself on the local network (through the LocalSend announcements, now always on) and connects to friends it finds there directly, even when the relays and the address directory are blocked.
+- **Your own relay comes first**: friends who use it too exchange with you through it, faster than through the shared public relays; friends on public relays are still reached on theirs, and the public relays stand in while yours does not answer.
+- **Your own relay as a way to the public ones**: on a network that blocks iroh's relays and directory (eduroam…), the app reaches them through your relay's tunnel and finds friends through its directory, which passes records to iroh's; friends need nothing. Each relay is tried directly first. Needs the latest P2P-Sender-relay.
+- **See how you are connected**: a chat shows whether the friend is on the local network, reached directly or through a relay; the header says when only the local network works.
+- **Clearer settings**: grouped by section (profile, general, chats and notifications, backup, network, about).
+
+Friends on 3.4 or older still talk to you as before; finding each other without the internet needs 3.4.5 on both sides. Install 3.4.5 by hand once: from then on, updates come by themselves.
+
 ## What's new in 3.4
 
 - **Chat**: reply to a message, react with an emoji, see when a message was read and when a friend is typing (can be turned off), search a conversation, clickable web links, and pictures (jpg, png, gif, webp, bmp) shown in the conversation with a preview.
@@ -58,7 +71,7 @@ When you send a file to a friend on the same network, its bytes now go over a di
 - The sender connects to an address of the friend on one of its own networks. Each side checks the other's certificate against the fingerprint it was told, so nobody else on the network can read the file or pass for your friend.
 - Offers, answers, cancelling and resuming still go through iroh. If the direct connection cannot be made or breaks, the transfer goes on through iroh from where it stopped.
 - The transfer list shows "Réseau local" next to the speed when a file takes this path.
-- Both friends need version 3.3. It works without turning on LocalSend compatibility.
+- Both friends need version 3.3.
 
 ### Chat with LocalSend devices
 
@@ -66,12 +79,12 @@ Each LocalSend device in the Friends tab now has a chat. Text sent from the Loca
 
 ## LocalSend compatibility
 
-Turn on Settings → Compatibilité LocalSend to exchange files and text with the LocalSend app on the same network:
+LocalSend compatibility is always on: the app exchanges files and text with the LocalSend app on the same network.
 
 - The computer shows up in LocalSend under your nickname. Each incoming file is offered for you to accept, like files from friends.
 - The devices found appear in the Friends tab, to send them files or open their chat. When we send, the device's certificate must match the fingerprint it announced.
 - It speaks LocalSend protocol v2.2 over HTTPS with a self-signed certificate (`localsend.json` in the app data folder), on port 53317 (TCP and UDP multicast), or another TCP port if that one is taken, for example by the LocalSend app itself.
-- Allow the app through the firewall on private networks. Networks that isolate their clients (guest Wi-Fi, some campus networks) keep devices from seeing each other.
+- Allow the app through the firewall, on public networks too (campus Wi-Fi is often one). Networks that isolate their clients (guest Wi-Fi, some campus networks) keep devices from seeing each other.
 
 ## Groups (since 3.1)
 
@@ -83,7 +96,7 @@ Turn on Settings → Compatibilité LocalSend to exchange files and text with th
 
 ## Self-hosted relay (since 3.2)
 
-Some networks (eduroam behind a FortiGate, for example) block iroh's public relays and address directory, so friends cannot reach each other. The app can use your own relay instead: run [P2P-Sender-relay](https://github.com/lamziiii/P2P-Sender-relay) behind an HTTPS reverse proxy, then enter its address (and token) in Settings → Relais personnel. Friends who want to reach you from such a network use the same relay.
+Some networks (eduroam behind a FortiGate, for example) block iroh's public relays and address directory, so friends cannot reach each other. The app can use your own relay as well: run [P2P-Sender-relay](https://github.com/lamziiii/P2P-Sender-relay) behind an HTTPS reverse proxy, then enter its address (and token) in Settings → Réseau → Relais personnel. Since 3.4.5 it comes first: it is the home relay whenever it answers, so friends who use it too exchange through it; friends elsewhere are still reached on their own relays, directly where the network allows and otherwise through your relay's tunnel (`src-tauri/src/p2p/tunnel.rs`: iroh goes through a local proxy that checks once per relay and network whether it answers directly); while it does not answer, the public relays stand in, and the app checks every minute whether it is back. Friends who want to reach you from a blocking network enter the same relay; friends on the same local network find each other without any relay.
 
 ## Version 3
 
@@ -122,11 +135,15 @@ The app and its installer are copied to `release/`. Cargo's working files go to 
 
 ### Release
 
-Set the same version in `package.json`, `src-tauri/tauri.conf.json` and `src-tauri/Cargo.toml`, then push a version tag (`git tag v3.3.0 && git push origin v3.3.0`): GitHub Actions checks that the tag matches that version, builds the installers for the three systems, publishes the release, then submits the new version to winget (see `.github/workflows/build.yml`). A prerelease tag (`v3.4.0-beta.1`) is published as a prerelease, not marked latest, and not sent to winget. The winget step needs a `WINGET_TOKEN` secret: a classic GitHub token with the `public_repo` scope.
+Set the version with `npm version <x.y.z> --no-git-tag-version` (package.json and its lock), the same in `src-tauri/tauri.conf.json` and `src-tauri/Cargo.toml`, then `cargo update -p p2pshare --offline` in `src-tauri` (builds use `--locked`). Push a version tag (`git tag v3.4.5 && git push origin v3.4.5`): GitHub Actions checks that the tag matches that version, builds the installers for the three systems and the APK, signs the update files, publishes the release with `latest.json` last (what installed apps read to update), then submits the new version to winget (see `.github/workflows/build.yml`). A stable release stops before publishing if the APK or the update signing key is missing, and before building if `CHANGELOG.md` has no `## x.y.z` section for it: that section becomes the release notes, the notes shown before installing an update, and what the app shows once updated. A prerelease tag (`v3.4.0-beta.1`) is published as a prerelease, not marked latest, and not sent to winget. The winget step needs a `WINGET_TOKEN` secret: a classic GitHub token with the `public_repo` scope.
 
 ### Android
 
 GitHub Actions builds an arm64 APK on every push, downloadable from the Actions tab as `Test-android`: it is signed with a temporary key, so each build must replace the previous one by uninstalling it first. To attach an APK to releases, create a release key once and keep it safe (without it, the app can never be updated), then add the secrets `ANDROID_KEYSTORE_BASE64` (the keystore in base64), `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS` and `ANDROID_KEY_PASSWORD`.
+
+### Updates
+
+On Windows, macOS and Linux (AppImage) the app looks for a newer release a minute after starting and then every 6 hours, and offers it over the friend list and in Settings (which also has a check button); installing saves everything and restarts the app. With "Installer les mises à jour automatiquement" on, it installs by itself once no transfer runs. It reads `latest.json` from the latest release, and only installs files signed with the updater key. Android has no automatic updates: Settings links to the releases page. A stable release needs the secrets `TAURI_SIGNING_PRIVATE_KEY` (the private key from `npx tauri signer generate`) and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`; its public key is in `src-tauri/tauri.conf.json`. Keep the private key safe: without it, installed apps cannot be updated any more.
 
 ### Code signing
 
@@ -146,13 +163,19 @@ cargo run --release --example groups_test --manifest-path src-tauri/Cargo.toml -
 cargo run --example localsend_receiver --manifest-path src-tauri/Cargo.toml -- <workdir> [seconds]
 cargo run --example localsend_send --manifest-path src-tauri/Cargo.toml -- <workdir> <device name> <file>... [--cancel-at <percent>]
 cargo run --example localsend_send --manifest-path src-tauri/Cargo.toml -- <workdir> <device name> --text <message>
+cargo run --example nearby_test --manifest-path src-tauri/Cargo.toml -- <workdir> [sans-local]
+cargo run --example relay_test --manifest-path src-tauri/Cargo.toml -- <workdir> <path to P2P-Sender-relay's p2p-relay>
+cargo run --example tunnel_test --manifest-path src-tauri/Cargo.toml -- <workdir> <path to P2P-Sender-relay's p2p-relay>
 cargo build --release --example bench --manifest-path src-tauri/Cargo.toml
-pwsh bench/run.ps1 -Sender v3 -Receiver v3 -File <some big file>
+pwsh bench/run.ps1 -File <some big file>
 ```
 
 - `groups_test` runs three nodes (two of them not friends) through invitations, group chat, delivery to a member who was offline, shared-file downloads from another member, and removal.
 - `localsend_receiver` runs a node with LocalSend on that accepts every file (except names containing `refuse`, declined, or `attente`, left unanswered; it cancels names containing `annule` midway), to send to from a LocalSend app or the LocalSend CLI. `localsend_send` sends files, or a text message, to a device by name and reports the outcome.
-- `bench` sends a file (or several, or a folder; `BENCH_COUNT` tells the receiver how many files to wait for) between two headless nodes and reports the throughput; set `BENCH_NO_LAN=1` to compare without the local-network path. `bench/run.ps1` runs it and also reports peak memory and CPU time; with `-Sender v2` it uses the Electron version's core (`../P2P_electron`) for comparison.
+- `tunnel_test` puts Alice on a simulated blocking network (`P2PSHARE_BLOCK_PUBLIC=1`: no direct access to iroh's relays and directory) with her relay, and Bob on public relays only: Alice finds Bob through her relay's directory, reaches his relay through the tunnel, and sends him a file.
+- `relay_test` checks that your own relay comes first: with it off, a node falls back to a public relay; once it is started, the node comes back to it, and two friends on it send a file (with `P2PSHARE_RELAY_ONLY=1`, without direct paths, so through the relay).
+- `nearby_test` runs two friends that find each other through the LocalSend announcements and send a file; with `P2PSHARE_NO_INTERNET=1` they have no relay and no address directory, as on a network that blocks them, and still connect over the local network.
+- `bench` sends a file (or several, or a folder; `BENCH_COUNT` tells the receiver how many files to wait for) between two headless nodes and reports the throughput; set `BENCH_NO_LAN=1` to compare without the local-network path. `bench/run.ps1` runs it and also reports peak memory and CPU time.
 
 ## Project layout
 

@@ -7,6 +7,7 @@ mod notify;
 pub mod p2p;
 pub mod store;
 mod system;
+mod update;
 pub mod vault;
 
 use std::collections::HashMap;
@@ -66,8 +67,8 @@ struct Config {
     relay_url: String,
     #[serde(default)]
     relay_token: String,
-    /// Receive files from the LocalSend app on the local network (on for
-    /// new installs; a saved choice is kept).
+    /// LocalSend used to be optional: it is always on now (it also finds
+    /// friends on the local network). Kept on, for an older version.
     #[serde(default = "enabled")]
     localsend: bool,
     /// The first-launch welcome was shown.
@@ -80,6 +81,13 @@ struct Config {
     /// Read receipts and "typing" with friends, both ways.
     #[serde(default = "enabled")]
     read_receipts: bool,
+    /// Desktop: a newer version is installed without asking (see update.rs).
+    #[serde(default)]
+    auto_update: bool,
+    /// The version whose install failed last (the old one restarted): not
+    /// installed by itself again, only when asked.
+    #[serde(default)]
+    update_failed: String,
     /// Speed limit of transfers in bytes per second, each way; 0 for none.
     #[serde(default)]
     speed_limit: u64,
@@ -177,8 +185,6 @@ struct AppState {
     localsend: Mutex<LocalSendSlot>,
     /// Text messages exchanged with LocalSend devices, by fingerprint.
     localsend_chats: Mutex<JsonStore<LocalSendChats>>,
-    /// Serializes turning LocalSend on and off.
-    localsend_toggle: tokio::sync::Mutex<()>,
     /// A save of the chats is due (see `localsend_chats_changed`).
     localsend_save_armed: AtomicBool,
     /// Session locked or on battery: background work is cut down.
@@ -404,7 +410,7 @@ impl AppState {
                 };
                 // Android drops multicast packets (discovery) without it.
                 #[cfg(target_os = "android")]
-                android::set_multicast(true);
+                android::hold_multicast();
             }
             Err(e) => {
                 eprintln!("LocalSend unavailable: {e}");
@@ -1298,31 +1304,6 @@ fn on_localsend_text(app: &AppHandle, from: localsend::TextSender, text: String)
     }
 }
 
-#[tauri::command]
-async fn set_localsend(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    enable: bool,
-) -> Result<Value, ()> {
-    let _toggle = state.localsend_toggle.lock().await;
-    {
-        let mut config = state.config();
-        config.data.localsend = enable;
-        log_save(config.save_now());
-    }
-    // Stop first, so a restart can take the port back.
-    let old = std::mem::take(&mut *state.localsend());
-    drop(old);
-    #[cfg(target_os = "android")]
-    if !enable {
-        android::set_multicast(false);
-    }
-    if enable {
-        state.start_localsend(&app).await;
-    }
-    Ok(localsend_status(&state))
-}
-
 // ─── Groups ──────────────────────────────────────────────────────────────────
 
 #[tauri::command]
@@ -1794,6 +1775,12 @@ fn on_p2p_event(app: &AppHandle, event: Event) {
                 json!({ "friendId": friend_id, "online": online }),
             );
         }
+        Event::FriendRoute { friend_id, route } => {
+            let _ = app.emit(
+                "friend-route",
+                json!({ "friendId": friend_id, "route": route }),
+            );
+        }
         Event::Transfer(t) => {
             let _ = app.emit("transfer-update", t);
         }
@@ -2174,6 +2161,8 @@ fn setup(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
             welcomed: false,
             dnd_until: 0,
             read_receipts: true,
+            auto_update: false,
+            update_failed: String::new(),
             speed_limit: 0,
             notifications: NotifySettings::default(),
             background_service: true,
@@ -2184,7 +2173,7 @@ fn setup(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
         log_save(config.save_now());
     }
     let auto_launch = config.data.auto_launch;
-    let localsend = config.data.localsend;
+    config.data.localsend = true;
     let nickname = config.data.nickname.clone();
     let relay = if config.data.relay_url.is_empty() {
         None
@@ -2255,7 +2244,6 @@ fn setup(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
             dir.join("localsend-chats.json"),
             LocalSendChats::new(),
         )),
-        localsend_toggle: tokio::sync::Mutex::new(()),
         localsend_save_armed: AtomicBool::new(false),
         economy: AtomicBool::new(false),
         network_watched: AtomicBool::new(false),
@@ -2264,16 +2252,11 @@ fn setup(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     let dnd_until = app.state::<AppState>().config().data.dnd_until;
     apply_dnd(app, dnd_until);
     watch_system(app);
-    if localsend {
+    {
         // In the background: the port may take a moment to give up on.
         let app = app.clone();
         tauri::async_runtime::spawn(async move {
-            let state = app.state::<AppState>();
-            let _toggle = state.localsend_toggle.lock().await;
-            // Unless it was turned off in the meantime.
-            if state.config().data.localsend {
-                state.start_localsend(&app).await;
-            }
+            app.state::<AppState>().start_localsend(&app).await;
         });
     }
 
@@ -2284,7 +2267,10 @@ fn setup(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
         android::set_service(app.state::<AppState>().config().data.background_service);
     }
     #[cfg(desktop)]
-    create_tray(app)?;
+    {
+        create_tray(app)?;
+        update::start(app);
+    }
     // Started at login: stay in the tray without creating the web view.
     let restarted = std::env::var_os(SHOW_AFTER_RESTART).is_some();
     std::env::remove_var(SHOW_AFTER_RESTART);
@@ -2373,7 +2359,8 @@ pub fn run() {
             .plugin(tauri_plugin_autostart::init(
                 MacosLauncher::LaunchAgent,
                 Some(vec![HIDDEN_ARG]),
-            ));
+            ))
+            .plugin(tauri_plugin_updater::Builder::new().build());
     }
     #[cfg(target_os = "android")]
     {
@@ -2384,6 +2371,10 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             hide_window,
+            update::get_update,
+            update::check_update,
+            update::install_update,
+            update::set_auto_update,
             get_my_id,
             get_friends,
             add_friend,
@@ -2426,7 +2417,6 @@ pub fn run() {
             get_relay_status,
             set_relay,
             get_localsend_status,
-            set_localsend,
             get_localsend_chats,
             get_localsend_chat,
             mark_localsend_read,

@@ -7,7 +7,7 @@ export const FINAL = new Set(['completed', 'declined', 'cancelled', 'error']);
 // How a running transfer's bytes go, shown next to its speed.
 export const ROUTE_LABELS: Record<Route, string> = { lan: 'Réseau local', direct: 'Direct', relay: 'Via relais' };
 export const RELAY_HINT =
-  'Par un serveur relais, plus lent qu’une connexion directe. Un relais auto-hébergé (Paramètres → Avancé) peut aider.';
+  'Par un serveur relais, plus lent qu’une connexion directe. Un relais personnel (Paramètres → Réseau) peut aider.';
 
 export const formatBytes = (n: number) => {
   if (n >= 1024 ** 3) return `${(n / 1024 ** 3).toFixed(2)} Go`;

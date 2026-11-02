@@ -25,6 +25,7 @@
 use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
+use iroh::endpoint::PathList;
 use iroh::TransportAddr;
 use netdev::ipnet::{Ipv4Net, Ipv6Net};
 use tokio::io::AsyncReadExt;
@@ -124,7 +125,7 @@ impl Lan {
 struct Nets {
     /// With whether the interface looks physical (not a VPN, VM or container).
     v4: Vec<(Ipv4Net, bool)>,
-    v6: Vec<Ipv6Net>,
+    v6: Vec<(Ipv6Net, bool)>,
 }
 
 impl Nets {
@@ -139,7 +140,7 @@ impl Nets {
             }
             let physical = i.is_physical() && !i.is_tun();
             nets.v4.extend(i.ipv4.iter().map(|n| (*n, physical)));
-            nets.v6.extend(i.ipv6.iter().copied());
+            nets.v6.extend(i.ipv6.iter().map(|n| (*n, physical)));
         }
         nets
     }
@@ -155,7 +156,19 @@ impl Nets {
     }
 
     fn has_v6(&self, ip: &std::net::Ipv6Addr) -> bool {
-        self.v6.iter().any(|n| !n.addr().is_loopback() && n.contains(ip))
+        self.v6.iter().any(|(n, _)| !n.addr().is_loopback() && n.contains(ip))
+    }
+
+    /// On the network of a physical interface: the local network, not a
+    /// VPN (Tailscale…), VM or container network.
+    fn near(&self, ip: IpAddr) -> bool {
+        match canonical(ip) {
+            IpAddr::V4(v4) => self.rank(&v4) == Some(0),
+            IpAddr::V6(v6) => self
+                .v6
+                .iter()
+                .any(|(n, physical)| *physical && !n.addr().is_loopback() && n.contains(&v6)),
+        }
     }
 }
 
@@ -183,6 +196,17 @@ fn canonical(ip: IpAddr) -> IpAddr {
         IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(ip, IpAddr::V4),
         v4 => v4,
     }
+}
+
+/// How a connection goes, from its selected path: "relay", "lan" (direct,
+/// to an address on the network of one of our physical interfaces) or
+/// "direct" (over the internet, or a VPN).
+pub(super) fn path_route(paths: &PathList) -> Option<&'static str> {
+    let selected = paths.iter().find(|p| p.is_selected())?;
+    let TransportAddr::Ip(addr) = selected.remote_addr() else {
+        return Some("relay");
+    };
+    Some(if Nets::ours().near(addr.ip()) { "lan" } else { "direct" })
 }
 
 /// Where to try a peer, given the addresses it advertised and those of the
@@ -637,10 +661,23 @@ mod tests {
                 ("172.17.0.1/16".parse().unwrap(), false),
             ],
             v6: vec![
-                "fe80::1/64".parse().unwrap(),
-                "2001:db8:1:2::10/64".parse().unwrap(),
+                ("fe80::1/64".parse().unwrap(), true),
+                ("2001:db8:1:2::10/64".parse().unwrap(), true),
+                ("fd7a:115c:a1e0::1/48".parse().unwrap(), false),
             ],
         }
+    }
+
+    #[test]
+    fn local_network_is_a_physical_interface_one() {
+        let nets = nets();
+        assert!(nets.near(ip("192.168.1.20")));
+        assert!(nets.near(ip("::ffff:192.168.1.20")));
+        assert!(nets.near(ip("2001:db8:1:2::30")));
+        // A container network, a VPN, the internet.
+        assert!(!nets.near(ip("172.17.0.5")));
+        assert!(!nets.near(ip("fd7a:115c:a1e0::5")));
+        assert!(!nets.near(ip("203.0.113.7")));
     }
 
     fn ip(s: &str) -> IpAddr {

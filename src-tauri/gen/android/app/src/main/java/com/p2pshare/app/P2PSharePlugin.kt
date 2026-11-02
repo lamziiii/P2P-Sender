@@ -204,21 +204,16 @@ class P2PSharePlugin(activity: Activity) : Plugin(activity) {
     }
   }
 
+  /** LocalSend is always on: the lock is kept for the life of the app. */
   @Command
-  fun setMulticast(invoke: Invoke) {
-    val args = invoke.parseArgs(EnabledArgs::class.java)
+  fun holdMulticast(invoke: Invoke) {
     synchronized(lock) {
-      if (args.enabled) {
-        if (multicast == null) {
-          val wifi = context.getSystemService(Context.WIFI_SERVICE) as? WifiManager
-          multicast = wifi?.createMulticastLock("p2pshare-localsend")?.apply {
-            setReferenceCounted(false)
-            acquire()
-          }
+      if (multicast == null) {
+        val wifi = context.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+        multicast = wifi?.createMulticastLock("p2pshare-localsend")?.apply {
+          setReferenceCounted(false)
+          acquire()
         }
-      } else {
-        multicast?.let { if (it.isHeld) it.release() }
-        multicast = null
       }
     }
     invoke.resolve()

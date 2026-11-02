@@ -11,7 +11,9 @@ Thumbs.db
 .vscode
 .idea
 release/
-# The Android release key and its password.
+# Signing keys (Android release, updates) and their passwords.
+key/
 P2PShare-cle-android/
+P2PShare-cle-mise-a-jour/
 *.jks
 secrets-github.txt
