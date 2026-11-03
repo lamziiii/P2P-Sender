@@ -1,6 +1,6 @@
 # Nouveautés de P2P Share
 
-## 3.4.5 — 2 novembre 2026
+## 3.4.5 — 3 novembre 2026
 
 - **Mises à jour automatiques** (Windows, macOS, Linux) : l'app trouve toute seule les nouvelles versions et vous les propose au-dessus de la liste d'amis et dans Paramètres → À propos, avec un bouton pour vérifier. Vous pouvez aussi les laisser s'installer seules, une fois les transferts terminés. Seules les versions signées par le projet sont installées. Sur Android, un bouton ouvre la page des versions.
 - **Vos amis sur le même réseau, même sans Internet** : l'app se signale sur le réseau local et se connecte directement aux amis qu'elle y trouve, même quand les relais sont bloqués.
