@@ -183,6 +183,24 @@ jobs:
         shell: bash
         run: cp signed-installer/*.exe src-tauri/target/release/bundle/nsis/
 
+      # The macOS update is the app in a .tar.gz (kept by the "app" bundle
+      # target). Packed on every build, so that a release tag meets no
+      # surprise; only tags sign it (below).
+      - name: Pack the macOS update
+        if: runner.os == 'macOS'
+        run: |
+          b=src-tauri/target/release/bundle
+          name=$(basename "$(ls $b/dmg/*.dmg)" .dmg)
+          # No ._ files for extended attributes: they would land in the
+          # installed app and break its signature.
+          COPYFILE_DISABLE=1 tar -C $b/macos -czf "$b/macos/$name.app.tar.gz" P2PShare.app
+          # What users get must pass the signature check, or macOS refuses
+          # to open the updated app.
+          mkdir "$RUNNER_TEMP/unpacked"
+          tar -xzf "$b/macos/$name.app.tar.gz" -C "$RUNNER_TEMP/unpacked"
+          codesign --verify --deep --strict "$RUNNER_TEMP/unpacked/P2PShare.app"
+          ls -l "$b/macos/$name.app.tar.gz"
+
       # What the app's updater downloads, each with its .sig: the installer
       # (after SignPath, when signed), the AppImage, the app in a .tar.gz.
       - name: Sign the update
@@ -196,13 +214,7 @@ jobs:
           case "$RUNNER_OS" in
             Windows) files=$(ls $b/nsis/*-setup.exe) ;;
             Linux) files=$(ls $b/appimage/*.AppImage) ;;
-            macOS)
-              name=$(basename "$(ls $b/dmg/*.dmg)" .dmg)
-              # No ._ files for extended attributes: they would land in the
-              # installed app and break its signature.
-              COPYFILE_DISABLE=1 tar -C $b/macos -czf "$b/macos/$name.app.tar.gz" P2PShare.app
-              files="$b/macos/$name.app.tar.gz"
-              ;;
+            macOS) files=$(ls $b/macos/*.app.tar.gz) ;;
           esac
           # Bound to the version: the app refuses a signature of another one
           # (requireSignedVersion), so an older release cannot pass for a new one.

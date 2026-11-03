@@ -41,7 +41,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis", "dmg", "appimage"],
+    "targets": ["nsis", "app", "dmg", "appimage"],
     "category": "Utility",
     "shortDescription": "Partage de fichiers et chat en pair-à-pair",
     "license": "MIT",
