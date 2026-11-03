@@ -1,6 +1,6 @@
 # Nouveautés de P2P Share
 
-## 3.4.6 — à venir
+## 3.4.6 — 3 novembre 2026
 
 - **Invitez vos amis avec un lien** : dans l'onglet Amis (bouton +), créez un lien d'invitation et envoyez-le par mail ou message. Votre ami clique dessus, P2P Share s'ouvre et lui demande s'il veut vous ajouter : vous voilà amis tous les deux, sans copier d'identifiant. Un lien sert à une seule personne et reste valable 7 jours. S'il n'ouvre pas l'app, il se colle dans l'onglet Amis.
 - **Votre identifiant P2P passe dans Paramètres → Avancé**, avec l'ajout par identifiant, pour vos amis restés en 3.4.5 ou avant.
