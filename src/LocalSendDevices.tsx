@@ -56,7 +56,10 @@ export function LocalSendDevices({ dropTarget, onSent, onOpenChat }: {
   };
 
   const unread = (fingerprint: string) => chats.find(c => c.fingerprint === fingerprint)?.unread ?? 0;
-  const present = new Set(devices.map(d => d.fingerprint));
+  // A friend's P2P Share is in the friends already (an earlier chat with it
+  // stays reachable below).
+  const shown = devices.filter(d => !d.friend);
+  const present = new Set(shown.map(d => d.fingerprint));
   const absent = chats.filter(c => !present.has(c.fingerprint));
 
   const chatButton = (fingerprint: string) => (
@@ -71,14 +74,14 @@ export function LocalSendDevices({ dropTarget, onSent, onOpenChat }: {
   return (
     <>
       <div className="section-header section-header-row">
-        <span>À proximité (LocalSend){devices.length > 0 ? ` · ${devices.length}` : ''}</span>
+        <span>À proximité (LocalSend){shown.length > 0 ? ` · ${shown.length}` : ''}</span>
         <button className="icon-btn small" title="Rechercher à nouveau" disabled={scanning} onClick={scan}>
           <Icon name="sync" size={14} />
         </button>
       </div>
-      {devices.length > 0 && (
+      {shown.length > 0 && (
         <div className="list">
-          {devices.map(d => (
+          {shown.map(d => (
             <div
               key={d.fingerprint}
               className={`list-item ${dropTarget === d.fingerprint ? 'drop-target' : ''}`}
@@ -102,7 +105,7 @@ export function LocalSendDevices({ dropTarget, onSent, onOpenChat }: {
           ))}
         </div>
       )}
-      {devices.length === 0 && (
+      {shown.length === 0 && (
         <div className="setting-sub" style={{ padding: '0 2px' }}>
           {scanning ? 'Recherche…' : 'Aucun appareil. Ouvrez LocalSend sur l’appareil (même Wi-Fi), puis relancez la recherche.'}
         </div>

@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { api } from './api';
-import type { Config, NotifySettings } from './api';
+import type { Config, Friend, NotifySettings } from './api';
 import { BackupRow } from './Backup';
 import { Icon } from './icons';
 import { LocalSendStatusRow } from './LocalSendSettings';
@@ -34,11 +34,13 @@ function Toggle({ checked, onChange }: { checked: boolean; onChange: (checked: b
   );
 }
 
-// Sections, each a title and one card of rows; the network ones folded.
-export function SettingsTab({ config, setConfig, myId, theme, setTheme, advancedOpen, onBack }: {
+// Sections, each a title and one card of rows; the network and advanced ones folded.
+export function SettingsTab({ config, setConfig, myId, onFriends, theme, setTheme, advancedOpen, onBack }: {
   config: Partial<Config>;
   setConfig: (update: (c: Partial<Config>) => Partial<Config>) => void;
   myId: string;
+  // After a friend added by their ID.
+  onFriends: (friends: Friend[]) => void;
   theme: Theme;
   setTheme: (theme: Theme) => void;
   // Opened on the network settings (from the connection warning).
@@ -48,6 +50,7 @@ export function SettingsTab({ config, setConfig, myId, theme, setTheme, advanced
   const [nickname, setNickname] = useState(config.nickname ?? '');
   const [saved, setSaved] = useState(false);
   const [network, setNetwork] = useState(advancedOpen);
+  const [advanced, setAdvanced] = useState(false);
   const [copied, setCopied] = useState(false);
   // Mobile: false once set_background_service failed (not in this backend).
   const [backgroundOk, setBackgroundOk] = useState(true);
@@ -67,9 +70,10 @@ export function SettingsTab({ config, setConfig, myId, theme, setTheme, advanced
   };
 
   const copy = () => {
-    navigator.clipboard.writeText(myId);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+    navigator.clipboard.writeText(myId).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    }, () => {});
   };
 
   return (
@@ -94,13 +98,6 @@ export function SettingsTab({ config, setConfig, myId, theme, setTheme, advanced
             onKeyDown={e => e.key === 'Enter' && e.currentTarget.blur()}
           />
           <div className="setting-sub" style={{ marginTop: 4 }}>Vu par vos amis, vos groupes et les appareils LocalSend.</div>
-        </div>
-        <div className="setting-row">
-          <div style={{ minWidth: 0 }}>
-            <div className="setting-label">Mon identifiant P2P</div>
-            <div className="id-value" title={myId}>{myId}</div>
-          </div>
-          <button className="btn btn-secondary btn-small" onClick={copy}><Icon name="copy" size={14} />{copied ? 'Copié !' : 'Copier'}</button>
         </div>
       </div>
 
@@ -223,11 +220,72 @@ export function SettingsTab({ config, setConfig, myId, theme, setTheme, advanced
         </div>
       )}
 
+      <button className="section-toggle list-button" aria-expanded={advanced} onClick={() => setAdvanced(!advanced)}>
+        <Icon name={advanced ? 'chevronDown' : 'chevronRight'} size={14} />
+        Avancé
+        <span className="setting-sub">Identifiant P2P, ajout par ID</span>
+      </button>
+      {advanced && (
+        <div className="card rows">
+          <div className="setting-row">
+            <div style={{ minWidth: 0 }}>
+              <div className="setting-label">Mon identifiant P2P</div>
+              <div className="id-value" title={myId}>{myId}</div>
+            </div>
+            <button className="btn btn-secondary btn-small" onClick={copy}><Icon name="copy" size={14} />{copied ? 'Copié !' : 'Copier'}</button>
+          </div>
+          <AddById onFriends={onFriends} />
+        </div>
+      )}
+
       <div className="settings-heading">À propos</div>
       <div className="card rows">
         <UpdateRows config={config} setConfig={setConfig} />
       </div>
     </>
+  );
+}
+
+const ADD_FRIEND_ERRORS: Record<string, string> = {
+  invalid_id: 'ID invalide : il doit faire 64 caractères (0-9, a-f).',
+  self: 'C’est votre propre ID.',
+};
+
+// For a friend on 3.4.5 or older, without invitation links: both add the
+// other's ID.
+function AddById({ onFriends }: { onFriends: (friends: Friend[]) => void }) {
+  const [id, setId] = useState('');
+  const [name, setName] = useState('');
+  const [error, setError] = useState('');
+  const [added, setAdded] = useState(false);
+
+  const add = async () => {
+    if (!id.trim()) return;
+    // The name may stay empty: the friend's nickname is then used.
+    const res = await api.addFriend(id, name);
+    if ('error' in res) {
+      setError(ADD_FRIEND_ERRORS[res.error] ?? 'Impossible d’ajouter cet ami.');
+      return;
+    }
+    setId('');
+    setName('');
+    setError('');
+    setAdded(true);
+    setTimeout(() => setAdded(false), 2000);
+    onFriends(res.friends);
+  };
+
+  return (
+    <div className="stack">
+      <div>
+        <div className="setting-label">Ajouter un ami par son ID{added && <span className="saved-mark"> · Ajouté ✓</span>}</div>
+        <div className="setting-sub">Pour un ami resté en version 3.4.5 ou avant, qui n’a pas les liens d’invitation : échangez vos ID, et ajoutez-vous tous les deux.</div>
+      </div>
+      <input className="input" placeholder="ID de l’ami (64 caractères)" value={id} onChange={e => { setId(e.target.value); setError(''); }} />
+      <input className="input" placeholder="Nom (facultatif : son pseudo sinon)" maxLength={40} value={name} onChange={e => setName(e.target.value)} onKeyDown={e => e.key === 'Enter' && add()} />
+      {error && <div className="error-text">{error}</div>}
+      <button className="btn btn-secondary" disabled={!id.trim()} onClick={add}><Icon name="plus" size={14} />Ajouter cet ami</button>
+    </div>
   );
 }
 

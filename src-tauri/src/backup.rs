@@ -54,6 +54,9 @@ const ASIDE_PREFIX: &str = "avant-restauration-";
 const FILES: &[&str] = &[
     "identity.key",
     "friends.json",
+    // Sealed with the history key, which the backup holds: links still open
+    // keep working once restored.
+    "invites.json",
     "config.json",
     "lan.json",
     "localsend.json",
@@ -69,6 +72,7 @@ const CHATS_DIR: &str = "messages";
 const REPLACED: &[&str] = &[
     "identity.",
     "friends.",
+    "invites.",
     "config.",
     "lan.",
     "localsend.",

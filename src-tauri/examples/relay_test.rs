@@ -27,6 +27,7 @@ async fn start(dir: &Path, name: &str, secret: SecretKey) -> Node {
     Node::start(Options {
         secret,
         friends: JsonStore::load(dir.join("friends.json"), Vec::new()),
+        invites: JsonStore::load(dir.join("invites.json"), Vec::new()),
         messages_dir: dir.join("messages"),
         download_dir: Arc::new(move || downloads.clone()),
         on_event: Arc::new(|_| {}),

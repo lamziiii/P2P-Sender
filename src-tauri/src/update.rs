@@ -106,6 +106,8 @@ mod imp {
         if pending.installing.swap(true, Ordering::SeqCst) {
             return Err("La mise à jour est déjà en cours.".into());
         }
+        // Every view of the update shows it started, not only the one clicked.
+        let _ = app.emit("update-progress", json!({ "done": 0, "total": null }));
         let mut done = 0u64;
         let progress = app.clone();
         let bytes = update
@@ -125,6 +127,20 @@ mod imp {
                 let _ = app.emit("update-error", &message);
                 message
             })?;
+        // Installing by itself: a transfer started during the download would
+        // be cut by the restart, and it does not resume after one.
+        if !show && transfers_running(app) {
+            let _ = app.emit("update-progress", json!({ "done": bytes.len(), "total": bytes.len(), "waiting": true }));
+            while auto_update(app) && transfers_running(app) {
+                tokio::time::sleep(IDLE_RETRY).await;
+            }
+            if !auto_update(app) {
+                // Turned off meanwhile: left for the user to install.
+                pending.installing.store(false, Ordering::SeqCst);
+                let _ = app.emit("update-progress", serde_json::Value::Null);
+                return Ok(());
+            }
+        }
         if let Some(state) = app.try_state::<AppState>() {
             log_save(state.config().save_now());
             state.save_localsend_chats();

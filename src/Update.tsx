@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api } from './api';
-import type { Config, UpdateInfo } from './api';
+import type { Config, UpdateInfo, UpdateProgress } from './api';
 import { ChangelogDialog } from './Changelog';
 import { formatBytes } from './format';
 import { Icon } from './icons';
@@ -13,7 +13,7 @@ const RELEASES_PAGE = 'https://github.com/lamziiii/P2P-Sender/releases/latest';
 // event. Installing shows the download, then the app restarts on it.
 function useUpdate() {
   const [update, setUpdate] = useState<UpdateInfo | null>(null);
-  const [progress, setProgress] = useState<{ done: number; total: number | null } | null>(null);
+  const [progress, setProgress] = useState<UpdateProgress | null>(null);
   const [error, setError] = useState('');
   useEffect(() => {
     if (isMobile) return;
@@ -47,7 +47,8 @@ function useUpdate() {
   return { update, setUpdate, progress, error, install };
 }
 
-function progressText(p: { done: number; total: number | null }) {
+function progressText(p: UpdateProgress) {
+  if (p.waiting) return 'Prête : installation à la fin des transferts.';
   if (!p.total) return p.done ? `Téléchargement… ${formatBytes(p.done)}` : 'Téléchargement…';
   if (p.done >= p.total) return 'Installation…';
   return `Téléchargement… ${Math.round((p.done / p.total) * 100)} %`;
@@ -80,6 +81,7 @@ export function UpdateRows({ config, setConfig }: {
   const [checking, setChecking] = useState(false);
   const [checked, setChecked] = useState('');
   const [news, setNews] = useState(false);
+  const [toggleError, setToggleError] = useState('');
   // A version to install comes first, with the notes it was published with.
   const releases = update?.notes
     ? [{ version: `${update.version} (à installer)`, date: '', lines: parseLines(update.notes) }, ...RELEASES]
@@ -135,15 +137,22 @@ export function UpdateRows({ config, setConfig }: {
         <div className="setting-row">
           <div>
             <div className="setting-label">Installer les mises à jour automatiquement</div>
-            <div className="setting-sub">Sans rien demander, une fois les transferts terminés. L’app redémarre d’elle-même.</div>
+            <div className="setting-sub" style={toggleError ? { color: 'var(--danger)' } : undefined}>
+              {toggleError || 'Sans rien demander, une fois les transferts terminés. L’app redémarre d’elle-même.'}
+            </div>
           </div>
           <label className="toggle">
             <input
               type="checkbox"
               checked={config.autoUpdate ?? false}
               onChange={async e => {
-                const autoUpdate = await api.setAutoUpdate(e.target.checked);
-                setConfig(c => ({ ...c, autoUpdate }));
+                setToggleError('');
+                try {
+                  const autoUpdate = await api.setAutoUpdate(e.target.checked);
+                  setConfig(c => ({ ...c, autoUpdate }));
+                } catch (err) {
+                  setToggleError(String(err));
+                }
               }}
             />
             <span className="toggle-track" />

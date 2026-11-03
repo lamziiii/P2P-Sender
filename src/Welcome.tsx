@@ -2,30 +2,24 @@ import { useState } from 'react';
 import { api } from './api';
 import { BackupDialog } from './Backup';
 import { Icon } from './icons';
+import { InviteLinkMaker } from './Invite';
 import { HideButton } from './PinButton';
 import { byPlatform, isMobile } from './platform';
 
-// First launch: the nickname, then the ID to give to friends.
-export function Welcome({ myId, nickname, onNickname, onDone }: {
-  myId: string;
+// First launch: the nickname, then how to invite friends.
+export function Welcome({ nickname, onNickname, onDone }: {
   nickname: string;
   onNickname: (nickname: string) => void;
   onDone: () => void;
 }) {
   const [step, setStep] = useState(0);
   const [name, setName] = useState(nickname);
-  const [copied, setCopied] = useState(false);
   const [restoring, setRestoring] = useState(false);
 
   const saveName = async () => {
     if (!name.trim()) return;
     onNickname(await api.setNickname(name));
     setStep(1);
-  };
-
-  const copy = () => {
-    navigator.clipboard.writeText(myId);
-    setCopied(true);
   };
 
   const finish = () => {
@@ -74,21 +68,18 @@ export function Welcome({ myId, nickname, onNickname, onDone }: {
 
         {step === 1 && (
           <>
-            <div className="welcome-title">Votre ID</div>
+            <div className="welcome-title">Invitez vos amis</div>
             <div className="welcome-text">
-              Pour ajouter un ami, envoyez-lui cet ID, puis ajoutez le sien dans l’onglet Amis. Vous devez vous ajouter tous les deux.
+              Créez un lien d’invitation et envoyez-le à un ami : il l’ouvre, accepte, et vous voilà amis. Vous en créerez d’autres dans l’onglet Amis.
             </div>
             <div className="card">
-              <div className="id-full">{myId}</div>
-              <button className="btn btn-secondary btn-small" style={{ marginTop: 8 }} onClick={copy}>
-                <Icon name="copy" size={14} />{copied ? 'Copié !' : 'Copier'}
-              </button>
+              <InviteLinkMaker />
             </div>
             <div className="welcome-text">
               {byPlatform(
                 'Astuce : glissez un fichier sur un ami pour le lui envoyer.',
                 'Astuce : touchez l’icône d’envoi à côté d’un ami pour lui envoyer un fichier.',
-              )} Vous retrouverez votre ID dans l’onglet Amis.
+              )}
             </div>
             <button className="btn" style={{ width: '100%' }} onClick={finish}>Commencer</button>
           </>

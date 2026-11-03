@@ -56,10 +56,17 @@ jobs:
             fi
           done
           # A stable release says what it brings: the release page and the
-          # app (after the update) show this section of CHANGELOG.md.
-          if [[ "$tag" != *-* ]] && ! awk -v v="$tag" '$1 == "##" && $2 == v { found = 1 } END { exit !found }' CHANGELOG.md; then
-            echo "::error file=CHANGELOG.md::no section \"## $tag\" for this version"
-            status=1
+          # app (after the update) show this section of CHANGELOG.md, dated
+          # ("à venir" stands for the date until the release).
+          heading=$(awk -v v="$tag" '$1 == "##" && $2 == v { print; exit }' CHANGELOG.md)
+          if [[ "$tag" != *-* ]]; then
+            if [ -z "$heading" ]; then
+              echo "::error file=CHANGELOG.md::no section \"## $tag\" for this version"
+              status=1
+            elif [[ "$heading" != *" — "?* ]] || [[ "$heading" == *"à venir"* ]]; then
+              echo "::error file=CHANGELOG.md::the section \"## $tag\" has no release date"
+              status=1
+            fi
           fi
           exit $status
 

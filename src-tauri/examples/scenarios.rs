@@ -50,6 +50,7 @@ impl Peer {
         Node::start(Options {
             secret: self.secret.clone(),
             friends: JsonStore::load(self.dir.join("friends.json"), Vec::new()),
+            invites: JsonStore::load(self.dir.join("invites.json"), Vec::new()),
             messages_dir: self.dir.join("messages"),
             download_dir: Arc::new(move || downloads.clone()),
             on_event: {

@@ -419,10 +419,15 @@ fn device_model() -> &'static str {
         "Windows"
     } else if cfg!(target_os = "macos") {
         "macOS"
+    } else if cfg!(target_os = "android") {
+        "Android"
     } else {
         "Linux"
     }
 }
+
+/// How LocalSend shows us: a phone or a computer.
+const DEVICE_TYPE: &str = if cfg!(mobile) { "mobile" } else { "desktop" };
 
 /// The text of a message, which LocalSend sends as a lone text file.
 fn message_text(request: &PrepareUpload) -> Option<String> {
@@ -563,6 +568,9 @@ struct Device {
     https: bool,
     /// Its certificate proved the fingerprint (otherwise it is only claimed).
     verified: bool,
+    /// The P2P ID it announces, when it runs P2P Share: a friend's is not
+    /// listed, being in the friends already (a false claim only hides it).
+    p2p_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -578,6 +586,12 @@ pub struct DeviceView {
     /// Files go over HTTPS to the device whose certificate matches; without
     /// it (older devices), anyone on the network could read them.
     pub secure: bool,
+    /// See `Device::p2p_id`.
+    #[serde(skip)]
+    pub p2p_id: Option<String>,
+    /// That ID is a friend's (set by the app): the list of devices leaves
+    /// it out, being in the friends already.
+    pub friend: bool,
 }
 
 /// The upload session in progress (LocalSend allows one at a time).
@@ -691,6 +705,8 @@ impl LocalSend {
                 device_model: d.model.clone(),
                 device_type: d.kind.clone(),
                 secure: d.https,
+                p2p_id: d.p2p_id.clone(),
+                friend: false,
             })
             .collect();
         list.sort_by_key(|d| d.alias.to_lowercase());
@@ -1137,6 +1153,11 @@ impl Inner {
             port,
             https,
             verified,
+            p2p_id: info
+                .p2pshare
+                .as_ref()
+                .map(|h| h.id.to_ascii_lowercase())
+                .filter(|id| crate::p2p::is_valid_id(id)),
         };
         let changed = {
             let mut devices = self.devices();
@@ -1243,7 +1264,7 @@ impl Inner {
             "alias": *self.alias(),
             "version": VERSION,
             "deviceModel": device_model(),
-            "deviceType": "desktop",
+            "deviceType": DEVICE_TYPE,
             "fingerprint": self.fingerprint,
             "download": false,
         });
@@ -1887,6 +1908,7 @@ mod tests {
             port: PORT,
             https: verified,
             verified,
+            p2p_id: None,
         }
     }
 

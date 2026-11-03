@@ -16,7 +16,13 @@ export type Friend = {
   autoAccept: boolean;
   // While online, how the connection goes.
   route?: Route;
+  // Added from their invitation link: until they let us in, or the link no longer works.
+  invite?: 'pending' | 'refused';
 };
+
+// An invitation link, before it is accepted. known: a friend already, and
+// connected; own: one of ours.
+export type InviteLink = { link: string; name: string; known: boolean; own: boolean };
 
 // An image sent or offered in the chat (the message id is the transfer's).
 // path: ours, or theirs once received; state: how the transfer ended.
@@ -50,6 +56,7 @@ export type Route = 'lan' | 'direct' | 'relay';
 // A newer version of the app; failed: its install failed already (the old
 // version restarted), it only installs when asked.
 export type UpdateInfo = { version: string; notes?: string; failed: boolean };
+export type UpdateProgress = { done: number; total: number | null; waiting?: boolean };
 
 export type Transfer = {
   id: string;
@@ -123,6 +130,8 @@ export type LocalSendDevice = {
   deviceType?: 'mobile' | 'desktop' | 'web' | 'headless' | 'server';
   // HTTPS to the device holding this fingerprint; otherwise unencrypted.
   secure: boolean;
+  // A friend's P2P Share: listed with the friends, not among these devices.
+  friend: boolean;
 };
 
 // A message of a LocalSend device's chat. unverified: theirs, from an older
@@ -267,6 +276,14 @@ export const api = {
   addFriend: (id: string, name: string) =>
     invoke<{ friends: Friend[] } | { error: 'invalid_id' | 'self' }>('add_friend', { id, name }),
   removeFriend: (id: string) => invoke<Friend[]>('remove_friend', { id }),
+  // Invitation links: one to send (valid 7 days, for one person); the one
+  // that opened the app, once; one pasted; accepting one.
+  createInvite: () => invoke<string>('create_invite'),
+  takeInviteLink: () => invoke<InviteLink | null>('take_invite_link'),
+  readInviteLink: (link: string) => invoke<InviteLink>('read_invite_link', { link }),
+  acceptInvite: (link: string) =>
+    invoke<{ friends: Friend[]; id: string } | { error: 'invalid_link' | 'self' }>('accept_invite', { link }),
+  onInviteLink: on<null>('invite-link'),
   // An empty name shows the friend's own nickname.
   renameFriend: (id: string, name: string) => invoke<Friend[]>('rename_friend', { id, name }),
   setFriendAutoAccept: (id: string, enable: boolean) => invoke<Friend[]>('set_friend_auto_accept', { id, enable }),
@@ -355,7 +372,8 @@ export const api = {
   // Install newer versions by themselves, once no transfer runs.
   setAutoUpdate: (enable: boolean) => invoke<boolean>('set_auto_update', { enable }),
   onUpdateAvailable: on<UpdateInfo>('update-available'),
-  onUpdateProgress: on<{ done: number; total: number | null }>('update-progress'),
+  // null: not installing (any more); waiting: downloaded, held until the transfers end.
+  onUpdateProgress: on<UpdateProgress | null>('update-progress'),
   // A download failed (French message), also when it started by itself.
   onUpdateError: on<string>('update-error'),
   // Restarts the app when the setting changes.

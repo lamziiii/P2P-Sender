@@ -2,6 +2,7 @@
 mod android;
 mod backup;
 pub mod group;
+pub mod invite;
 pub mod localsend;
 mod notify;
 pub mod p2p;
@@ -51,6 +52,10 @@ const SHOW_AFTER_RESTART: &str = "P2PSHARE_SHOW_WINDOW";
 static QUITTING: AtomicBool = AtomicBool::new(false);
 /// Chat to open once a freshly created window has loaded: (kind, id).
 static PENDING_CHAT: Mutex<Option<(&'static str, String)>> = Mutex::new(None);
+/// An invitation link that opened the app, for the window to ask about.
+static PENDING_INVITE: Mutex<Option<String>> = Mutex::new(None);
+/// The last link the window was asked about: `get_current` keeps giving it.
+static SEEN_INVITE: Mutex<Option<String>> = Mutex::new(None);
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -491,9 +496,13 @@ fn get_friends(state: State<AppState>) -> Vec<FriendView> {
 }
 
 #[tauri::command]
-fn add_friend(state: State<AppState>, id: String, name: String) -> Value {
+fn add_friend(app: AppHandle, state: State<AppState>, id: String, name: String) -> Value {
     match state.node.add_friend(&id, &name) {
-        Ok(friends) => json!({ "friends": friends }),
+        Ok(friends) => {
+            // Now a friend: no longer among the LocalSend devices.
+            let _ = app.emit("localsend-devices", ());
+            json!({ "friends": friends })
+        }
         Err(error) => json!({ "error": error }),
     }
 }
@@ -504,8 +513,107 @@ fn rename_friend(state: State<AppState>, id: String, name: String) -> Vec<Friend
 }
 
 #[tauri::command]
-fn remove_friend(state: State<AppState>, id: String) -> Vec<FriendView> {
-    state.node.remove_friend(&id)
+fn remove_friend(app: AppHandle, state: State<AppState>, id: String) -> Vec<FriendView> {
+    let friends = state.node.remove_friend(&id);
+    // Back among the LocalSend devices, if it is around.
+    let _ = app.emit("localsend-devices", ());
+    friends
+}
+
+// ─── Invitation links (see invite.rs and p2p/invites.rs) ─────────────────────
+
+/// What the window shows about a link before it is accepted.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct InviteView {
+    /// The link itself, to accept it with.
+    link: String,
+    /// The nickname of whoever made it, as the link says (may be empty).
+    name: String,
+    /// They are a friend already, and connected.
+    known: bool,
+    /// One of our own links.
+    own: bool,
+}
+
+fn invite_view(state: &AppState, link: String) -> Option<InviteView> {
+    let parsed = invite::parse(&link)?;
+    let known = state
+        .node
+        .friends()
+        .iter()
+        .any(|f| f.id == parsed.id && f.online);
+    Some(InviteView {
+        own: parsed.id == state.node.id(),
+        known,
+        name: parsed.name,
+        link,
+    })
+}
+
+/// A link to send to a friend: valid 7 days, for one person.
+#[tauri::command]
+fn create_invite(state: State<AppState>) -> String {
+    let code = state.node.create_invite();
+    let nickname = state.config().data.nickname.clone();
+    invite::make(&state.node.id(), &code, &nickname)
+}
+
+/// An invitation link opened the app, or reached it while it runs: the
+/// window asks whether to add whoever made it.
+fn on_invite_link(app: &AppHandle, urls: Vec<url::Url>) {
+    let Some(link) = urls
+        .into_iter()
+        .map(String::from)
+        .find(|u| invite::parse(u).is_some())
+    else {
+        return;
+    };
+    *SEEN_INVITE.lock().unwrap_or_else(|e| e.into_inner()) = Some(link.clone());
+    *PENDING_INVITE.lock().unwrap_or_else(|e| e.into_inner()) = Some(link);
+    // A window created now takes it once loaded; one already there is told.
+    if cfg!(target_os = "android") || !show_window(app) {
+        let _ = app.emit("invite-link", ());
+    }
+}
+
+/// The link that opened the app, if the window was not asked about it yet.
+#[tauri::command]
+fn take_invite_link(app: AppHandle, state: State<AppState>) -> Option<InviteView> {
+    let pending = PENDING_INVITE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take();
+    // On Android, a link the app was started with may come before anyone
+    // listens: the plugin keeps it.
+    let link = pending.or_else(|| {
+        use tauri_plugin_deep_link::DeepLinkExt;
+        let url = String::from(app.deep_link().get_current().ok()??.into_iter().next()?);
+        let mut seen = SEEN_INVITE.lock().unwrap_or_else(|e| e.into_inner());
+        (seen.as_deref() != Some(url.as_str())).then(|| {
+            *seen = Some(url.clone());
+            url
+        })
+    })?;
+    invite_view(&state, link)
+}
+
+/// A link pasted in the window (when clicking it did not open the app).
+#[tauri::command]
+fn read_invite_link(state: State<AppState>, link: String) -> Result<InviteView, String> {
+    invite_view(&state, link.trim().to_string())
+        .ok_or_else(|| "Ce n’est pas un lien d’invitation P2P Share valide.".to_string())
+}
+
+#[tauri::command]
+fn accept_invite(state: State<AppState>, link: String) -> Value {
+    let Some(parsed) = invite::parse(&link) else {
+        return json!({ "error": "invalid_link" });
+    };
+    match state.node.accept_invite(&parsed.id, &parsed.name, &parsed.code) {
+        Ok(friends) => json!({ "friends": friends, "id": parsed.id }),
+        Err(error) => json!({ "error": error }),
+    }
 }
 
 #[tauri::command]
@@ -1099,12 +1207,18 @@ fn localsend_status(state: &AppState) -> Value {
 
 #[tauri::command]
 fn get_localsend_devices(state: State<AppState>) -> Vec<localsend::DeviceView> {
-    state
+    let mut devices = state
         .localsend()
         .service
         .as_ref()
         .map(LocalSend::devices)
-        .unwrap_or_default()
+        .unwrap_or_default();
+    // A friend's P2P Share, announced on the network (a false claim only
+    // hides a device).
+    for d in &mut devices {
+        d.friend = d.p2p_id.as_deref().is_some_and(|id| state.node.is_friend(id));
+    }
+    devices
 }
 
 /// Look for devices again; the list comes back through `localsend-devices`.
@@ -1573,7 +1687,11 @@ fn show_window(app: &AppHandle) -> bool {
                 return false;
             };
             match WebviewWindowBuilder::from_config(app, config).and_then(|b| b.build()) {
-                Ok(w) => (w, true),
+                Ok(w) => {
+                    #[cfg(target_os = "macos")]
+                    join_current_space(&w);
+                    (w, true)
+                }
                 Err(_) => return false,
             }
         }
@@ -1588,6 +1706,23 @@ fn show_window(app: &AppHandle) -> bool {
     let _ = w.show();
     let _ = w.set_focus();
     created
+}
+
+/// Like a menu bar flyout, the window belongs to every Space, so it opens on
+/// the current one, over a full-screen app too. Otherwise macOS switches to
+/// the desktop to show it, and the focus lost on the way hides it at once.
+#[cfg(target_os = "macos")]
+fn join_current_space(w: &WebviewWindow) {
+    use objc2_app_kit::{NSWindow, NSWindowCollectionBehavior};
+    // Run on the main thread, where AppKit windows live.
+    let _ = w.with_webview(|webview| {
+        let window = unsafe { &*webview.ns_window().cast::<NSWindow>() };
+        window.setCollectionBehavior(
+            window.collectionBehavior()
+                | NSWindowCollectionBehavior::CanJoinAllSpaces
+                | NSWindowCollectionBehavior::FullScreenAuxiliary,
+        );
+    });
 }
 
 #[cfg(desktop)]
@@ -1786,6 +1921,20 @@ fn on_p2p_event(app: &AppHandle, event: Event) {
         }
         Event::FriendsChanged => {
             let _ = app.emit("friends-changed", ());
+            // A friend added or gone: also the list of LocalSend devices.
+            let _ = app.emit("localsend-devices", ());
+        }
+        Event::InviteAccepted { friend_id, name } => {
+            if notice_allowed(app, Notice::Friend(&friend_id)) {
+                let who = if name.is_empty() { "Votre ami" } else { name.as_str() };
+                notify_chat(
+                    app,
+                    "Invitation acceptée",
+                    &format!("{who} est maintenant dans vos amis."),
+                    "friend",
+                    friend_id,
+                );
+            }
         }
         Event::MessageStatus { friend_id, id } => {
             let _ = app.emit(
@@ -2203,6 +2352,8 @@ fn setup(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     let node = tauri::async_runtime::block_on(Node::start(p2p::Options {
         secret: load_identity(&dir.join("identity.key"))?,
         friends,
+        // Encrypted: whoever reads a code may use the link.
+        invites: JsonStore::load_sealed(dir.join("invites.json"), Vec::new()),
         messages_dir: dir.join("messages"),
         download_dir: Arc::new(move || {
             // No folder picker there: always the shared Downloads.
@@ -2270,6 +2421,25 @@ fn setup(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     {
         create_tray(app)?;
         update::start(app);
+    }
+    {
+        use tauri_plugin_deep_link::DeepLinkExt;
+        // The installers register the links too; an AppImage, a portable or
+        // moved app only this way. Never a development build.
+        #[cfg(any(windows, target_os = "linux"))]
+        if !cfg!(debug_assertions) {
+            if let Err(e) = app.deep_link().register_all() {
+                eprintln!("invitation links not registered: {e}");
+            }
+        }
+        let handle = app.clone();
+        app.deep_link()
+            .on_open_url(move |event| on_invite_link(&handle, event.urls()));
+        // Started by a link (Windows, Linux; macOS and Android tell it later).
+        #[cfg(desktop)]
+        if let Ok(Some(urls)) = app.deep_link().get_current() {
+            on_invite_link(app, urls);
+        }
     }
     // Started at login: stay in the tray without creating the web view.
     let restarted = std::env::var_os(SHOW_AFTER_RESTART).is_some();
@@ -2367,6 +2537,8 @@ pub fn run() {
         builder = builder.plugin(android::init());
     }
     let app = builder
+        // After single-instance, which hands it the links a second launch got.
+        .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
@@ -2379,6 +2551,10 @@ pub fn run() {
             get_friends,
             add_friend,
             remove_friend,
+            create_invite,
+            take_invite_link,
+            read_invite_link,
+            accept_invite,
             rename_friend,
             get_config,
             select_download_dir,

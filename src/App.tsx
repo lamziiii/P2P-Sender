@@ -1,7 +1,7 @@
 import { useCallback, useState, useEffect, useRef } from 'react';
 import type { ReactNode } from 'react';
 import { api } from './api';
-import type { ChatMessage, Config, DropTarget, Friend, GroupsOverview, OpenChat, Transfer } from './api';
+import type { ChatMessage, Config, DropTarget, Friend, GroupsOverview, InviteLink, OpenChat, Transfer } from './api';
 import { ChangelogDialog } from './Changelog';
 import { DndButton } from './Dnd';
 import { FINAL, folderErrors, folderSendError, formatBytes, plural, RELAY_HINT, ROUTE_LABELS } from './format';
@@ -10,6 +10,7 @@ import { FriendsTab } from './FriendsTab';
 import type { Unread } from './FriendsTab';
 import { GroupsTab, GroupView } from './Groups';
 import { Icon } from './icons';
+import { InviteDialog } from './Invite';
 import { WindowButtons } from './PinButton';
 import { LocalSendChatView } from './LocalSendChat';
 import { isMobile, useBackButton } from './platform';
@@ -88,6 +89,8 @@ function App() {
   const [news, setNews] = useState(false);
   // Friend whose removal waits for confirmation.
   const [removing, setRemoving] = useState<Friend | null>(null);
+  // An invitation link opened (or pasted): asked whether to add whoever made it.
+  const [invite, setInvite] = useState<InviteLink | null>(null);
   // Files dragged over the window, and where they would go.
   const [dragging, setDragging] = useState(false);
   const [dropTarget, setDropTarget] = useState<DropTarget | null>(null);
@@ -190,6 +193,7 @@ function App() {
   };
 
   const loadFriends = () => { api.getFriends().then(setFriends); };
+  const takeInvite = () => { api.takeInviteLink().then(link => { if (link) setInvite(link); }); };
 
   // A message came or went: its friend's last message, without asking the
   // whole list again (unless the friend or our ID is not known yet).
@@ -388,6 +392,8 @@ function App() {
       ),
       api.onGroupUpdate(loadGroups),
       api.onFriendsChanged(loadFriends),
+      // Asked once listening too: a link that opened the app comes before.
+      api.onInviteLink(takeInvite, takeInvite),
       api.onDragDrop(e => {
         if (e.type === 'leave') {
           setDragging(false);
@@ -604,7 +610,7 @@ function App() {
           <div className="modal" role="dialog" aria-modal="true" onClick={e => e.stopPropagation()}>
             <div className="modal-title">Supprimer {removing.name} ?</div>
             <div className="modal-text">
-              Vous ne pourrez plus discuter ni échanger de fichiers avec cet ami. Pour le retrouver, il faudra ajouter à nouveau son ID.
+              Vous ne pourrez plus discuter ni échanger de fichiers avec cet ami. Pour le retrouver, il faudra vous inviter à nouveau.
               <RemovedTransfers friendId={removing.id} />
             </div>
             <div style={{ display: 'flex', gap: 8 }}>
@@ -614,6 +620,18 @@ function App() {
           </div>
         </div>
       )}
+      {invite && (
+        <InviteDialog
+          invite={invite}
+          onDone={added => {
+            setInvite(null);
+            if (added) {
+              setFriends(added.friends);
+              setActiveTab('friends');
+            }
+          }}
+        />
+      )}
     </>
   );
   const withOverlays = (view: ReactNode) => <>{view}{overlays}</>;
@@ -622,7 +640,6 @@ function App() {
   if (welcome) {
     return (
       <Welcome
-        myId={myId}
         nickname={nickname}
         onNickname={saved => { setNickname(saved); setConfig(c => ({ ...c, nickname: saved })); }}
         onDone={() => { setWelcome(false); setConfig(c => ({ ...c, welcomed: true })); }}
@@ -766,8 +783,8 @@ function App() {
             friends={friends}
             unread={unread}
             dropTarget={dropTarget}
-            myId={myId}
             onFriends={setFriends}
+            onOpenInvite={setInvite}
             onOpenChat={openChatWith}
             onSendFile={sendFile}
             onSendFolder={sendFolder}
@@ -798,6 +815,7 @@ function App() {
             config={config}
             setConfig={setConfig}
             myId={myId}
+            onFriends={setFriends}
             theme={theme}
             setTheme={setTheme}
             advancedOpen={settingsAdvanced}

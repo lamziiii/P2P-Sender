@@ -50,6 +50,7 @@ async fn main() {
     let node = Node::start(Options {
         secret: SecretKey::generate(),
         friends: JsonStore::load(work.join(format!("{role}-v3-friends.json")), Vec::new()),
+        invites: JsonStore::load(work.join(format!("{role}-v3-invites.json")), Vec::new()),
         messages_dir: work.join(format!("{role}-v3-messages")),
         download_dir: Arc::new(move || out.clone()),
         on_event: Arc::new(move |e| {

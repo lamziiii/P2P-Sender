@@ -24,10 +24,12 @@
 mod chats;
 mod external;
 mod groups;
+mod invites;
 mod lan;
 mod tunnel;
 
 pub use external::{ExternalFile, OutgoingFile};
+pub use invites::{clean_nickname, is_code as is_invite_code, Invite};
 
 pub use groups::{GroupDetail, GroupFileView, GroupMessageView, GroupsOverview};
 
@@ -237,6 +239,13 @@ pub struct Friend {
     /// "" for a reaction taken back. Kept here to survive a restart.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     unsent_reactions: HashMap<String, String>,
+    /// The code of their invitation link we accepted: sent when we dial
+    /// them, until they answer (see `invites.rs`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    invite: Option<String>,
+    /// They turned it down (expired, already used): a new link is needed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    invite_refused: bool,
 }
 
 impl Friend {
@@ -380,6 +389,10 @@ pub struct FriendView {
     /// While online, how the connection goes: "lan", "direct" or "relay".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub route: Option<&'static str>,
+    /// Added from their invitation link: "pending" until they let us in,
+    /// "refused" if the link no longer works.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub invite: Option<&'static str>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Debug)]
@@ -560,6 +573,11 @@ pub enum Event {
         friend_id: String,
         route: Option<&'static str>,
     },
+    /// Someone used one of our invitation links: a friend now.
+    InviteAccepted {
+        friend_id: String,
+        name: String,
+    },
     Message {
         friend_id: String,
         message: ChatMessage,
@@ -614,6 +632,8 @@ pub enum Event {
 pub struct Options {
     pub secret: SecretKey,
     pub friends: JsonStore<Vec<Friend>>,
+    /// The invitation links we made that are still to be used.
+    pub invites: JsonStore<Vec<Invite>>,
     /// Where chats live, one file per friend; `<messages_dir>.json`, the
     /// single file of earlier versions, is moved there on first start.
     pub messages_dir: PathBuf,
@@ -942,6 +962,8 @@ struct State {
     secret: SecretKey,
     nickname: String,
     friends: Saved<Vec<Friend>>,
+    /// Written at once on each change (they are few and rare).
+    invites: JsonStore<Vec<Invite>>,
     chats: chats::Chats,
     groups: HashMap<String, groups::GroupState>,
     gmeta: Saved<groups::GroupsMeta>,
@@ -1515,7 +1537,9 @@ pub fn is_executable(name: &str) -> bool {
         "ps1", "psm1", "vbs", "vbe", "js", "jse", "wsf", "wsh", "hta", "cpl", "lnk", "url", "scf",
         "reg", "jar", "dll", "sys", "inf", "chm", "iso", "img", "vhd", "vhdx", "application",
         "settingcontent-ms", "library-ms", "docm", "xlsm", "pptm", "dotm", "xlam", "ppam", "sh",
-        "command", "app", "pkg", "dmg", "deb", "rpm", "appimage", "run", "desktop",
+        "command", "app", "pkg", "dmg", "deb", "rpm", "appimage", "run", "desktop", "msc", "ws",
+        "wsc", "jnlp", "appref-ms", "diagcab", "py", "pyw", "pyz", "scpt", "applescript",
+        "terminal", "workflow",
     ];
     let ext = extension(name).trim_start_matches('.').to_lowercase();
     RISKY.contains(&ext.as_str())
@@ -1920,6 +1944,7 @@ impl Node {
             secret,
             nickname: opts.nickname,
             friends: Saved::new(opts.friends),
+            invites: opts.invites,
             chats: chats::Chats::open(opts.messages_dir),
             groups: group_states,
             gmeta: Saved::new(gmeta),
@@ -2545,6 +2570,10 @@ impl Node {
         self.with(|s| friend_views(s))
     }
 
+    pub fn is_friend(&self, id: &str) -> bool {
+        self.with(|s| s.is_friend(id))
+    }
+
     pub fn friend_name(&self, id: &str) -> Option<String> {
         self.with(|s| {
             s.friends
@@ -2575,6 +2604,8 @@ impl Node {
                     nickname: String::new(),
                     auto_accept: false,
                     unsent_reactions: HashMap::new(),
+                    invite: None,
+                    invite_refused: false,
                 }),
             }
             // Stays dirty on failure: the timer retries.
@@ -2682,10 +2713,10 @@ impl Node {
         let node = self.clone();
         let friend_id = friend_id.to_string();
         self.spawn(async move {
-            if let Ok(Ok(conn)) =
-                tokio::time::timeout(NEARBY_DIAL_TIMEOUT, node.0.endpoint.connect(addr, ALPN)).await
-            {
-                node.clone().setup(conn, true).await;
+            match tokio::time::timeout(NEARBY_DIAL_TIMEOUT, node.0.endpoint.connect(addr, ALPN)).await {
+                Ok(Ok(conn)) => node.clone().setup(conn, true, false).await,
+                Ok(Err(e)) => node.with(|s| s.note_dial_error(&friend_id, &e)),
+                Err(_) => {}
             }
             node.with(|s| s.nearby_dialing.remove(&friend_id));
         });
@@ -2715,10 +2746,10 @@ impl Node {
         let node = self.clone();
         let friend_id = friend_id.to_string();
         self.spawn(async move {
-            if let Ok(Ok(conn)) =
-                tokio::time::timeout(DIAL_TIMEOUT, node.0.endpoint.connect(key, ALPN)).await
-            {
-                node.clone().setup(conn, true).await;
+            match tokio::time::timeout(DIAL_TIMEOUT, node.0.endpoint.connect(key, ALPN)).await {
+                Ok(Ok(conn)) => node.clone().setup(conn, true, false).await,
+                Ok(Err(e)) => node.with(|s| s.note_dial_error(&friend_id, &e)),
+                Err(_) => {}
             }
             let economy = node.0.economy.load(Ordering::Relaxed);
             node.with(|s| {
@@ -2755,37 +2786,60 @@ impl Node {
                 let Ok(Ok(conn)) = tokio::time::timeout(HANDSHAKE_TIMEOUT, incoming).await else {
                     return;
                 };
-                // Only friends and members of our groups may connect.
+                // Only friends and members of our groups may connect, and
+                // whoever brings the code of one of our links (see invites.rs).
                 let friend_id = conn.remote_id().to_string();
-                if !node.with(|s| s.is_allowed(&friend_id)) {
-                    conn.close(VarInt::from_u32(CLOSE_REJECTED), b"not a friend");
-                    return;
-                }
-                node.setup(conn, false).await;
+                let stranger = match node.with(|s| s.admit(&friend_id)) {
+                    Ok(stranger) => stranger,
+                    Err(reason) => {
+                        conn.close(VarInt::from_u32(CLOSE_REJECTED), reason);
+                        return;
+                    }
+                };
+                node.setup(conn, false, stranger).await;
             });
         }
     }
 
     /// Open (dialer) or accept (listener) the control stream, then register.
-    async fn setup(self, conn: Connection, outgoing: bool) {
+    /// The hello may carry the code of an invitation link: a `stranger`
+    /// (listener only, see `State::admit`) gets in only with a valid one.
+    async fn setup(self, conn: Connection, outgoing: bool, stranger: bool) {
+        let peer = conn.remote_id().to_string();
+        let hello = if outgoing {
+            self.with(|s| s.hello(&peer))
+        } else {
+            Value::Null
+        };
         let streams = tokio::time::timeout(HANDSHAKE_TIMEOUT, async {
             if outgoing {
                 let (mut send, recv) = conn.open_bi().await.ok()?;
                 // A stream only becomes visible to the peer once data is sent.
-                send.write_all(&frame(&json!({ "type": "hello" })))
-                    .await
-                    .ok()?;
-                Some((send, recv))
+                send.write_all(&frame(&hello)).await.ok()?;
+                Some((send, recv, Value::Null))
             } else {
                 let (send, mut recv) = conn.accept_bi().await.ok()?;
-                read_frame(&mut recv).await?;
-                Some((send, recv))
+                let hello = read_frame(&mut recv).await?;
+                Some((send, recv, hello))
             }
         })
         .await;
         match streams {
-            Ok(Some((send, recv))) => self.with(|s| self.register(s, conn, send, recv, outgoing)),
-            _ => conn.close(VarInt::from_u32(CLOSE_NORMAL), b"handshake"),
+            Ok(Some((send, recv, hello))) => self.with(|s| {
+                let redeemed = !outgoing && s.redeem_invite(&peer, &hello);
+                if stranger && !redeemed {
+                    conn.close(VarInt::from_u32(CLOSE_REJECTED), b"invite");
+                    return;
+                }
+                self.register(s, conn, send, recv, outgoing)
+            }),
+            _ => {
+                // Turned away before the hello got through.
+                if let Some(err) = conn.close_reason().filter(|_| outgoing) {
+                    self.with(|s| s.note_refusal(&peer, &err));
+                }
+                conn.close(VarInt::from_u32(CLOSE_NORMAL), b"handshake")
+            }
         }
     }
 
@@ -2838,8 +2892,11 @@ impl Node {
         let watched = conn.clone();
         let fid = friend_id.clone();
         self.spawn(async move {
-            watched.closed().await;
-            node.with(|s| node.on_close(s, &fid, id));
+            let err = watched.closed().await;
+            node.with(|s| {
+                s.note_refusal(&fid, &err);
+                node.on_close(s, &fid, id)
+            });
         });
         // Tell the UI how the connection goes, each time iroh changes path.
         let node = self.clone();
@@ -2887,6 +2944,9 @@ impl Node {
             });
         }
 
+        if !outgoing {
+            s.send_pending_invite(&friend_id);
+        }
         s.send_lan_advert(&friend_id);
         s.send_profile(&friend_id);
         s.flush_outbox(&friend_id, true);
@@ -3016,9 +3076,15 @@ impl Node {
             return;
         }
         let tid = msg.get("tid").and_then(Value::as_str).filter(|t| is_tid(t));
+        // Whatever link we came with, they let us in.
+        s.invite_answered(friend_id);
         // Group co-members who are not friends get no private chat or offers.
         let friend = s.is_friend(friend_id);
         match msg.get("type").and_then(Value::as_str) {
+            // A co-member accepted one of our links (see invites.rs).
+            Some("invite") if !friend => {
+                s.redeem_invite(friend_id, msg);
+            }
             Some("chat") if friend => self.on_chat(s, friend_id, msg),
             Some("chat_ack") if friend => self.on_chat_ack(s, friend_id, msg),
             Some("chat_react") if friend => self.on_chat_react(s, friend_id, msg),
@@ -4742,6 +4808,11 @@ fn friend_views(s: &State) -> Vec<FriendView> {
                 last_mine: last.is_some_and(|m| m.from == s.me),
                 auto_accept: f.auto_accept,
                 route: s.conns.get(&f.id).and_then(|c| c.route),
+                invite: if f.invite_refused {
+                    Some("refused")
+                } else {
+                    f.invite.as_ref().map(|_| "pending")
+                },
             }
         })
         .collect()

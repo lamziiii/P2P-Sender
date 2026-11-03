@@ -31,11 +31,20 @@ The installers are not signed yet: Windows SmartScreen may ask you to confirm, a
 - **Fast on the local network** (3.3): when a friend is on the same network, the bytes go over a direct connection instead of the internet path.
 - **Groups**: group chats of up to 32 members and a shared file repository per group; members do not need to be friends with each other.
 - **LocalSend**: send and receive files with the LocalSend app, and chat with LocalSend devices (3.3).
-- **Friends only**: your ID is your public key (64 hex characters); only your friends and the members of your groups can connect, and every connection is checked against their key.
+- **Friends only**: your ID is your public key (64 hex characters); only your friends, the members of your groups and someone bringing the code of one of your open invitation links can connect, and every connection is checked against their key. Friends add each other with an invitation link (3.4.6), or by ID.
 - **Self-hosted relay**: for networks that block iroh's public relays.
 - **Tray app**: Windows 11 (Fluent) look, dark and light themes, clickable notifications, optional start with the computer (hidden in the tray).
 
 The full list of changes, for users and in French, is in [CHANGELOG.md](CHANGELOG.md); the app shows it after each update and in Settings → À propos.
+
+## What's new in 3.4.6
+
+- **Invitation links** instead of exchanging IDs: Friends tab → + → create a link, send it by mail or message. Clicking it opens P2P Share, which asks whether to add whoever sent it; both become friends, nobody types an ID. A link works for one person, for 7 days; pasted in the Friends tab when clicking does not open the app. Your ID moves to Settings → Avancé, with adding by ID, for friends on 3.4.5 or older.
+- **macOS**: the window opens on the current Space, over a full-screen app too, instead of switching to the desktop and needing a second click.
+- **No friends twice**: a friend on the same network is no longer listed among the nearby LocalSend devices as well (their app must be 3.4.5 or later, which announces its P2P ID).
+- **Automatic updates** wait for a transfer started during the download instead of cutting it with the restart.
+- **More file types count as programs** (Python scripts, Windows consoles, macOS scripts and workflows…): never accepted without asking, even from a trusted friend.
+- An Android phone shows as a phone, not a Linux computer, on other LocalSend devices.
 
 ## What's new in 3.4.5
 
@@ -135,7 +144,11 @@ The app and its installer are copied to `release/`. Cargo's working files go to 
 
 ### Release
 
-Set the version with `npm version <x.y.z> --no-git-tag-version` (package.json and its lock), the same in `src-tauri/tauri.conf.json` and `src-tauri/Cargo.toml`, then `cargo update -p p2pshare --offline` in `src-tauri` (builds use `--locked`). Push a version tag (`git tag v3.4.5 && git push origin v3.4.5`): GitHub Actions checks that the tag matches that version, builds the installers for the three systems and the APK, signs the update files, publishes the release with `latest.json` last (what installed apps read to update), then submits the new version to winget (see `.github/workflows/build.yml`). A stable release stops before publishing if the APK or the update signing key is missing, and before building if `CHANGELOG.md` has no `## x.y.z` section for it: that section becomes the release notes, the notes shown before installing an update, and what the app shows once updated. A prerelease tag (`v3.4.0-beta.1`) is published as a prerelease, not marked latest, and not sent to winget. The winget step needs a `WINGET_TOKEN` secret: a classic GitHub token with the `public_repo` scope.
+Set the version with `npm version <x.y.z> --no-git-tag-version` (package.json and its lock), the same in `src-tauri/tauri.conf.json` and `src-tauri/Cargo.toml`, then `cargo update -p p2pshare --offline` in `src-tauri` (builds use `--locked`). Push a version tag (`git tag v3.4.6 && git push origin v3.4.6`): GitHub Actions checks that the tag matches that version, builds the installers for the three systems and the APK, signs the update files, publishes the release with `latest.json` last (what installed apps read to update), then submits the new version to winget (see `.github/workflows/build.yml`). A stable release stops before publishing if the APK or the update signing key is missing, and before building if `CHANGELOG.md` has no `## x.y.z — <date>` section for it (until the release, the section of the next version says « à venir » instead of the date): that section becomes the release notes, the notes shown before installing an update, and what the app shows once updated. A prerelease tag (`v3.4.0-beta.1`) is published as a prerelease, not marked latest, and not sent to winget. The winget step needs a `WINGET_TOKEN` secret: a classic GitHub token with the `public_repo` scope.
+
+### Invitation links
+
+A link is `https://lamziiii.github.io/P2P-Sender/ami/#i=<ID>&c=<code>&n=<nickname>`: a page of this repository (`docs/ami/index.html`, published by GitHub Pages: Settings → Pages → Deploy from a branch, `main`, folder `/docs`) that opens the app with `p2pshare://ami?…`, since mail and chat apps only make web links clickable. The part after `#` never reaches the server. The app registers the `p2pshare` scheme through `tauri-plugin-deep-link` (the installers, and the app itself at start on Windows and Linux for an AppImage or a moved app; Info.plist on macOS; an intent filter on Android). The code, made for one link (`src-tauri/src/p2p/invites.rs`), is kept 7 days in `invites.json` (encrypted), with at most 20 links open at once (a new one drops the oldest); whoever accepts the link adds its maker and sends the code in the hello of its connection (or first thing on a connection the maker opens, as a co-member of a group), and the maker, who lets in a peer that is not a friend only with a valid code, adds them in turn. Link format: `src-tauri/src/invite.rs`.
 
 ### Android
 
@@ -164,6 +177,7 @@ cargo run --example localsend_receiver --manifest-path src-tauri/Cargo.toml -- <
 cargo run --example localsend_send --manifest-path src-tauri/Cargo.toml -- <workdir> <device name> <file>... [--cancel-at <percent>]
 cargo run --example localsend_send --manifest-path src-tauri/Cargo.toml -- <workdir> <device name> --text <message>
 cargo run --example nearby_test --manifest-path src-tauri/Cargo.toml -- <workdir> [sans-local]
+cargo run --example invite_test --manifest-path src-tauri/Cargo.toml -- <workdir>
 cargo run --example relay_test --manifest-path src-tauri/Cargo.toml -- <workdir> <path to P2P-Sender-relay's p2p-relay>
 cargo run --example tunnel_test --manifest-path src-tauri/Cargo.toml -- <workdir> <path to P2P-Sender-relay's p2p-relay>
 cargo build --release --example bench --manifest-path src-tauri/Cargo.toml
@@ -175,6 +189,7 @@ pwsh bench/run.ps1 -File <some big file>
 - `tunnel_test` puts Alice on a simulated blocking network (`P2PSHARE_BLOCK_PUBLIC=1`: no direct access to iroh's relays and directory) with her relay, and Bob on public relays only: Alice finds Bob through her relay's directory, reaches his relay through the tunnel, and sends him a file.
 - `relay_test` checks that your own relay comes first: with it off, a node falls back to a public relay; once it is started, the node comes back to it, and two friends on it send a file (with `P2PSHARE_RELAY_ONLY=1`, without direct paths, so through the relay).
 - `nearby_test` runs two friends that find each other through the LocalSend announcements and send a file; with `P2PSHARE_NO_INTERNET=1` they have no relay and no address directory, as on a network that blocks them, and still connect over the local network.
+- `invite_test` runs three nodes without internet: Alice makes a link, Bob accepts it and both become friends; Carol tries the same link, is turned away, and her app shows that the link no longer works.
 - `bench` sends a file (or several, or a folder; `BENCH_COUNT` tells the receiver how many files to wait for) between two headless nodes and reports the throughput; set `BENCH_NO_LAN=1` to compare without the local-network path. `bench/run.ps1` runs it and also reports peak memory and CPU time.
 
 ## Project layout

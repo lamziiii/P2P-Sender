@@ -1,15 +1,11 @@
 import { useEffect, useState } from 'react';
 import { api } from './api';
-import type { DropTarget, Friend, NotifySettings } from './api';
+import type { DropTarget, Friend, InviteLink, NotifySettings } from './api';
 import { avatarColor, formatDate, initial } from './format';
 import { Icon } from './icons';
+import { InviteFriend } from './Invite';
 import { LocalSendDevices } from './LocalSendDevices';
 import { fitOnScreen, useFoldersSupported } from './platform';
-
-const ADD_FRIEND_ERRORS: Record<string, string> = {
-  invalid_id: 'ID invalide : il doit faire 64 caractères (0-9, a-f).',
-  self: 'C’est votre propre ID.',
-};
 
 // Beyond this many friends, a search field helps find one.
 const SEARCH_FROM = 10;
@@ -22,57 +18,6 @@ export function Avatar({ id, name, online, small }: { id: string; name: string; 
     <div className={`avatar ${small ? 'small' : ''}`} style={{ background: avatarColor(id), color: '#fff' }}>
       {initial(name)}
       {online && <span className="presence" title="En ligne" />}
-    </div>
-  );
-}
-
-// My ID to give, and the form to add a friend with theirs.
-function AddFriend({ myId, onAdded, onClose }: {
-  myId: string;
-  onAdded: (friends: Friend[]) => void;
-  onClose?: () => void;
-}) {
-  const [id, setId] = useState('');
-  const [name, setName] = useState('');
-  const [error, setError] = useState('');
-  const [copied, setCopied] = useState(false);
-
-  const copy = () => {
-    navigator.clipboard.writeText(myId);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
-  };
-
-  const add = async () => {
-    if (!id.trim()) return;
-    // The name may stay empty: the friend's nickname is then used.
-    const res = await api.addFriend(id, name);
-    if ('error' in res) {
-      setError(ADD_FRIEND_ERRORS[res.error] ?? 'Impossible d’ajouter cet ami.');
-      return;
-    }
-    setId('');
-    setName('');
-    setError('');
-    onAdded(res.friends);
-  };
-
-  return (
-    <div className="card stack">
-      <div className="section-header-row">
-        <div className="card-label" style={{ marginBottom: 0 }}>Mon ID</div>
-        {onClose && <button className="icon-btn small" title="Fermer" onClick={onClose}><Icon name="close" size={14} /></button>}
-      </div>
-      <div className="id-box-inline">
-        <div className="id-value">{myId}</div>
-        <button className="btn btn-secondary btn-small" onClick={copy}><Icon name="copy" size={14} />{copied ? 'Copié !' : 'Copier'}</button>
-      </div>
-      <div className="setting-sub">Envoyez-le à votre ami, puis ajoutez le sien ci-dessous : vous devez vous ajouter tous les deux.</div>
-      <div className="card-label" style={{ margin: '4px 0 0' }}>Ajouter un ami</div>
-      <input className="input" placeholder="ID de l’ami (64 caractères)" value={id} onChange={e => { setId(e.target.value); setError(''); }} />
-      <input className="input" placeholder="Nom (facultatif : son pseudo sinon)" value={name} onChange={e => setName(e.target.value)} onKeyDown={e => e.key === 'Enter' && add()} />
-      {error && <div className="error-text">{error}</div>}
-      <button className="btn" disabled={!id.trim()} onClick={add}><Icon name="plus" size={14} />Ajouter cet ami</button>
     </div>
   );
 }
@@ -107,13 +52,14 @@ function RenameDialog({ friend, onDone }: { friend: Friend; onDone: (friends?: F
   );
 }
 
-export function FriendsTab({ friends, unread, dropTarget, myId, onFriends, onOpenChat, onSendFile, onSendFolder, onRemove, onLocalSendSent, onOpenLocalSendChat, mutedFriends, onMuted }: {
+export function FriendsTab({ friends, unread, dropTarget, onFriends, onOpenInvite, onOpenChat, onSendFile, onSendFolder, onRemove, onLocalSendSent, onOpenLocalSendChat, mutedFriends, onMuted }: {
   friends: Friend[];
   unread: Unread;
   // Where files dragged over the window would go.
   dropTarget: DropTarget | null;
-  myId: string;
   onFriends: (friends: Friend[]) => void;
+  // A link pasted: asked about like one that opened the app.
+  onOpenInvite: (invite: InviteLink) => void;
   onOpenChat: (id: string) => void;
   onSendFile: (id: string) => void;
   onSendFolder: (id: string) => void;
@@ -159,16 +105,15 @@ export function FriendsTab({ friends, unread, dropTarget, myId, onFriends, onOpe
       <div className="section-header section-header-row">
         <span>Amis{friends.length > 0 ? ` (${friends.length})` : ''}</span>
         {friends.length > 0 && (
-          <button className={`icon-btn small ${adding ? 'active' : ''}`} title="Ajouter un ami · mon ID" onClick={() => setAdding(!adding)}>
+          <button className={`icon-btn small ${adding ? 'active' : ''}`} title="Inviter un ami" onClick={() => setAdding(!adding)}>
             <Icon name="plus" size={14} />
           </button>
         )}
       </div>
 
       {(adding || friends.length === 0) && (
-        <AddFriend
-          myId={myId}
-          onAdded={list => { onFriends(list); setAdding(false); }}
+        <InviteFriend
+          onOpenLink={invite => { setAdding(false); onOpenInvite(invite); }}
           onClose={friends.length > 0 ? () => setAdding(false) : undefined}
         />
       )}
@@ -184,9 +129,14 @@ export function FriendsTab({ friends, unread, dropTarget, myId, onFriends, onOpe
         <div className="list">
           {shown.map(f => {
             const count = unreadOf(f);
-            const preview = f.legacy
-              ? 'ID obsolète : demandez-lui son nouvel ID'
+            let preview = f.legacy
+              ? 'Ancien ID : demandez-lui un lien d’invitation'
               : unread[f.id]?.last ?? (f.lastText ? `${f.lastMine ? 'Vous : ' : ''}${f.lastText}` : f.online ? 'En ligne' : 'Aucun message');
+            // Added from their link: they must be online once to let us in.
+            // Short, to fit a phone's row.
+            if (f.invite === 'pending') preview = 'En attente de sa connexion';
+            if (f.invite === 'refused') preview = 'Lien refusé : demandez-en un nouveau';
+            const warn = f.legacy || f.invite === 'refused';
             return (
               <div
                 key={f.id}
@@ -209,7 +159,7 @@ export function FriendsTab({ friends, unread, dropTarget, myId, onFriends, onOpe
                     {f.lastTs > 0 && <span className="item-time">{formatDate(f.lastTs)}</span>}
                   </div>
                   <div className="row-top">
-                    <span className={`item-sub ellipsis ${f.legacy ? 'danger' : ''} ${count > 0 ? 'unread' : ''}`}>{preview}</span>
+                    <span className={`item-sub ellipsis ${warn ? 'danger' : ''} ${count > 0 ? 'unread' : ''}`}>{preview}</span>
                     {count > 0 && <span className="badge" title="Messages non lus">{count}</span>}
                   </div>
                 </div>

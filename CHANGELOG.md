@@ -1,5 +1,16 @@
 # Nouveautés de P2P Share
 
+## 3.4.6 — à venir
+
+- **Invitez vos amis avec un lien** : dans l'onglet Amis (bouton +), créez un lien d'invitation et envoyez-le par mail ou message. Votre ami clique dessus, P2P Share s'ouvre et lui demande s'il veut vous ajouter : vous voilà amis tous les deux, sans copier d'identifiant. Un lien sert à une seule personne et reste valable 7 jours. S'il n'ouvre pas l'app, il se colle dans l'onglet Amis.
+- **Votre identifiant P2P passe dans Paramètres → Avancé**, avec l'ajout par identifiant, pour vos amis restés en 3.4.5 ou avant.
+- **Mises à jour automatiques** : une mise à jour attend la fin d'un transfert commencé pendant son téléchargement, au lieu de le couper en redémarrant.
+- **Vos amis n'apparaissent plus en double** : un ami sur le même réseau n'est plus listé aussi parmi les appareils LocalSend à proximité (il lui faut la 3.4.5 ou plus).
+- **Plus de types de programmes reconnus** (scripts Python, consoles Windows, scripts et processus macOS…) : ils ne sont jamais acceptés sans vous demander, même d'un ami de confiance.
+- Corrections : sur Mac, la fenêtre s'ouvre là où vous êtes, même par-dessus une app en plein écran, au lieu de vous ramener sur le bureau et de demander un second clic ; un téléphone Android apparaît comme un téléphone, et non comme un ordinateur Linux, sur les autres appareils LocalSend.
+
+Les liens d'invitation demandent la 3.4.6 des deux côtés ; avec un ami resté en 3.4.5 ou avant, échangez vos identifiants (Paramètres → Avancé).
+
 ## 3.4.5 — 3 novembre 2026
 
 - **Mises à jour automatiques** (Windows, macOS, Linux) : l'app trouve toute seule les nouvelles versions et vous les propose au-dessus de la liste d'amis et dans Paramètres → À propos, avec un bouton pour vérifier. Vous pouvez aussi les laisser s'installer seules, une fois les transferts terminés. Seules les versions signées par le projet sont installées. Sur Android, un bouton ouvre la page des versions.

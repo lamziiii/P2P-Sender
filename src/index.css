@@ -310,15 +310,6 @@ svg {
   user-select: all;
 }
 
-.id-full {
-  font-family: Consolas, 'Cascadia Mono', monospace;
-  font-size: 12px;
-  color: var(--text-secondary);
-  word-break: break-all;
-  line-height: 1.5;
-  user-select: all;
-}
-
 /* ─── Lists (OneDrive-like file rows) ─── */
 .section-header {
   font-size: 12px;
@@ -1915,7 +1906,6 @@ button:focus-visible,
 .mobile .transfer-strip,
 .mobile .path-box,
 .mobile .id-value,
-.mobile .id-full,
 .mobile .pin-title,
 .mobile .quote-author,
 .mobile .bubble-quote,

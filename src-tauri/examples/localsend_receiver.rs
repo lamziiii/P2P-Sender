@@ -29,6 +29,7 @@ async fn main() {
     let node = Node::start(Options {
         secret: SecretKey::generate(),
         friends: JsonStore::load(work.join("friends.json"), Vec::new()),
+        invites: JsonStore::load(work.join("invites.json"), Vec::new()),
         messages_dir: work.join("messages"),
         download_dir: Arc::new(move || downloads.clone()),
         on_event: Arc::new(|_| {}),
