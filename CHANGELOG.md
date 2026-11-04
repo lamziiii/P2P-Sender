@@ -1,6 +1,6 @@
 # Nouveautés de P2P Share
 
-## 3.4.8 — à venir
+## 3.4.8 — 4 novembre 2026
 
 - **Les appareils LocalSend se présentent comme vos amis** : un clic ouvre la discussion, avec le dernier message, l'heure et les messages non lus. Le bouton d'envoi de fichiers reste sur la ligne, et le menu « … » permet de couper les notifications et de supprimer la discussion. Elle n'est effacée que chez vous : les messages restent dans l'app LocalSend de l'autre appareil. Dans la discussion, le trombone envoie un fichier.
 - **Envoyer à un ami** : le bouton d'envoi, sur sa ligne, propose un fichier ou un dossier, comme le trombone de la discussion.

@@ -1,6 +1,6 @@
 [package]
 name = "p2pshare"
-version = "3.4.7"
+version = "3.4.8"
 description = "Partage de fichiers et chat en pair-à-pair"
 authors = ["lamzii"]
 license = "MIT"
