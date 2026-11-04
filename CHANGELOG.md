@@ -1,5 +1,10 @@
 # Nouveautés de P2P Share
 
+## 3.4.7 — à venir
+
+- **Réseau local désactivable** : dans Paramètres → Réseau, un bouton coupe l'usage du réseau local par l'app. Vous n'y êtes plus visible, LocalSend s'arrête, et vos amis sur le même réseau ne sont plus joints que par Internet, sans la connexion plus rapide. L'app redémarre pour appliquer le changement.
+- **La sauvegarde passe dans Paramètres → Avancé**, avec votre identifiant P2P.
+
 ## 3.4.6 — 3 novembre 2026
 
 - **Invitez vos amis avec un lien** : dans l'onglet Amis (bouton +), créez un lien d'invitation et envoyez-le par mail ou message. Votre ami clique dessus, P2P Share s'ouvre et lui demande s'il veut vous ajouter : vous voilà amis tous les deux, sans copier d'identifiant. Un lien sert à une seule personne et reste valable 7 jours. S'il n'ouvre pas l'app, il se colle dans l'onglet Amis.

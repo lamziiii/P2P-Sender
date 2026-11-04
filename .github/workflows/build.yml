@@ -2,9 +2,11 @@ name: Build/Release
 
 # Every push and pull request builds the installers (downloadable from the
 # Actions tab). A GitHub release is only published when a version tag
-# (v1.2.3) is pushed; it must match the version of package.json,
-# tauri.conf.json and Cargo.toml. A prerelease tag (v1.2.3-beta.1) is
-# published as a prerelease, not marked latest, and not sent to winget.
+# (v1.2.3, or v1.2.3.4 with the optional fourth number) is pushed; it must
+# match the version of package.json, tauri.conf.json and Cargo.toml, where a
+# fourth number is semver build metadata (1.2.3+4, see set-version.mjs). A
+# prerelease tag (v1.2.3-beta.1) is published as a prerelease, not marked
+# latest, and not sent to winget.
 # A manual run can target some platforms only, e.g.
 #   gh workflow run build.yml -f platforms='["macos-latest"]'
 on:
@@ -32,17 +34,29 @@ jobs:
   # A release tag must name the version being built.
   version:
     runs-on: ubuntu-latest
+    outputs:
+      # The version as the files write it: 1.2.3+4 for the tag v1.2.3.4.
+      version: ${{ steps.check.outputs.version }}
     steps:
       - name: Check out git repository
         if: startsWith(github.ref, 'refs/tags/v')
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Check the tag against the app version
+        id: check
         if: startsWith(github.ref, 'refs/tags/v')
         env:
           TAG: ${{ github.ref_name }}
         run: |
           tag="${TAG#v}"
+          if ! [[ "$tag" =~ ^[0-9]+\.[0-9]+\.[0-9]+(\.[1-9][0-9]*|-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::the tag $TAG is not v1.2.3, v1.2.3.4 (from .1) or v1.2.3-beta.1"
+            exit 1
+          fi
+          # Cargo, npm and Tauri take three numbers only: a fourth one is
+          # semver build metadata in the files.
+          version=$(echo "$tag" | sed -E 's/^([0-9]+\.[0-9]+\.[0-9]+)\.([0-9]+)$/\1+\2/')
+          echo "version=$version" >> "$GITHUB_OUTPUT"
           npm_version=$(node -p "require('./package.json').version")
           tauri_version=$(node -p "require('./src-tauri/tauri.conf.json').version")
           # The first version line is the one of [package].
@@ -50,8 +64,8 @@ jobs:
           echo "tag $tag · package.json $npm_version · tauri.conf.json $tauri_version · Cargo.toml $cargo_version"
           status=0
           for pair in "package.json:$npm_version" "src-tauri/tauri.conf.json:$tauri_version" "src-tauri/Cargo.toml:$cargo_version"; do
-            if [ "${pair#*:}" != "$tag" ]; then
-              echo "::error file=${pair%%:*}::version ${pair#*:} does not match the tag $TAG"
+            if [ "${pair#*:}" != "$version" ]; then
+              echo "::error file=${pair%%:*}::version ${pair#*:} does not match the tag $TAG (expected $version)"
               status=1
             fi
           done
@@ -216,6 +230,7 @@ jobs:
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          VERSION: ${{ needs.version.outputs.version }}
         run: |
           b=src-tauri/target/release/bundle
           case "$RUNNER_OS" in
@@ -225,7 +240,8 @@ jobs:
           esac
           # Bound to the version: the app refuses a signature of another one
           # (requireSignedVersion), so an older release cannot pass for a new one.
-          for f in $files; do npx tauri signer sign --app-version "${GITHUB_REF_NAME#v}" "$f" > /dev/null; ls -l "$f.sig"; done
+          # The one latest.json announces: 1.2.3+4 for v1.2.3.4.
+          for f in $files; do npx tauri signer sign --app-version "$VERSION" "$f" > /dev/null; ls -l "$f.sig"; done
 
       - name: Upload installers
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
@@ -302,7 +318,8 @@ jobs:
         run: |
           chmod +x src-tauri/gen/android/gradlew
           npx tauri android build --apk --target aarch64
-          version=$(node -p "require('./package.json').version")
+          # Named as the tag: 1.2.3.4, not 1.2.3+4.
+          version=$(node -p "require('./package.json').version.replace('+', '.')")
           mkdir -p apk
           mv src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk "apk/P2PShare_${version}_android-arm64.apk"
 
@@ -316,7 +333,7 @@ jobs:
           if-no-files-found: error
 
   publish:
-    needs: [build, android]
+    needs: [version, build, android]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
@@ -329,6 +346,15 @@ jobs:
           # Not the unsigned files sent for signing, nor a test APK.
           pattern: P2PShare-*
           merge-multiple: true
+
+      # The bundler names the files after the version of the files, where a
+      # fourth number reads "+4": the release files say 1.2.3.4, as the tag.
+      - name: Name the files after the tag
+        run: |
+          find artifacts -type f -name '*+*' | while IFS= read -r f; do
+            mv "$f" "$(dirname "$f")/$(basename "$f" | tr '+' '.')"
+          done
+          find artifacts -type f | sort
 
       - name: Check out the changelog
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -407,6 +433,8 @@ jobs:
         env:
           TAG: ${{ github.ref_name }}
           REPO: ${{ github.repository }}
+          # As signed (see "Sign the update"): 1.2.3+4 for v1.2.3.4.
+          VERSION: ${{ needs.version.outputs.version }}
         run: |
           python3 - <<'PY'
           import glob, json, os, sys, datetime
@@ -425,7 +453,7 @@ jobs:
                   'url': f'https://github.com/{repo}/releases/download/{tag}/{name}',
               }
           latest = {
-              'version': tag[1:],
+              'version': os.environ['VERSION'],
               'notes': open('notes.md', encoding='utf-8').read().strip(),
               'pub_date': datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
               'platforms': platforms,

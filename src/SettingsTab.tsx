@@ -3,7 +3,7 @@ import { api } from './api';
 import type { Config, Friend, NotifySettings } from './api';
 import { BackupRow } from './Backup';
 import { Icon } from './icons';
-import { LocalSendStatusRow } from './LocalSendSettings';
+import { LocalNetworkRow } from './LocalSendSettings';
 import { isMac, isMobile, MOBILE_DOWNLOADS } from './platform';
 import { RelaySettings } from './RelaySettings';
 import { UpdateRows } from './Update';
@@ -183,15 +183,10 @@ export function SettingsTab({ config, setConfig, myId, onFriends, theme, setThem
         <NotificationRows config={config} setConfig={setConfig} />
       </div>
 
-      <div className="settings-heading">Sauvegarde</div>
-      <div className="card rows">
-        <BackupRow />
-      </div>
-
       <button className="section-toggle list-button" aria-expanded={network} onClick={() => setNetwork(!network)}>
         <Icon name={network ? 'chevronDown' : 'chevronRight'} size={14} />
         Réseau
-        <span className="setting-sub">Vitesse, relais, LocalSend</span>
+        <span className="setting-sub">Vitesse, relais, réseau local</span>
       </button>
       {network && (
         <div className="card rows">
@@ -216,17 +211,18 @@ export function SettingsTab({ config, setConfig, myId, onFriends, theme, setThem
             <div className="setting-sub" style={{ marginTop: 4 }}>Dans chaque sens, pour laisser de la place au reste du réseau.</div>
           </div>
           <RelaySettings config={config} />
-          <LocalSendStatusRow nickname={config.nickname} />
+          <LocalNetworkRow nickname={config.nickname} enabled={config.localNetwork ?? true} />
         </div>
       )}
 
       <button className="section-toggle list-button" aria-expanded={advanced} onClick={() => setAdvanced(!advanced)}>
         <Icon name={advanced ? 'chevronDown' : 'chevronRight'} size={14} />
         Avancé
-        <span className="setting-sub">Identifiant P2P, ajout par ID</span>
+        <span className="setting-sub">Sauvegarde, identifiant P2P, ajout par ID</span>
       </button>
       {advanced && (
         <div className="card rows">
+          <BackupRow />
           <div className="setting-row">
             <div style={{ minWidth: 0 }}>
               <div className="setting-label">Mon identifiant P2P</div>

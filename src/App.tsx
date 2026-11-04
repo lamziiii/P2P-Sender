@@ -726,7 +726,9 @@ function App() {
     blocked: {
       label: 'Relais injoignables',
       className: 'danger',
-      hint: 'Les relais ne répondent pas : vos amis ne sont joignables que sur le même réseau. Ouvrir les réglages réseau.',
+      hint: config.localNetwork === false
+        ? 'Les relais ne répondent pas et le réseau local est désactivé : vos amis ne sont pas joignables. Ouvrir les réglages réseau.'
+        : 'Les relais ne répondent pas : vos amis ne sont joignables que sur le même réseau. Ouvrir les réglages réseau.',
     },
   }[shown];
   return withOverlays(
@@ -783,6 +785,7 @@ function App() {
             friends={friends}
             unread={unread}
             dropTarget={dropTarget}
+            localNetwork={config.localNetwork ?? true}
             onFriends={setFriends}
             onOpenInvite={setInvite}
             onOpenChat={openChatWith}

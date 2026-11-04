@@ -72,10 +72,15 @@ struct Config {
     relay_url: String,
     #[serde(default)]
     relay_token: String,
-    /// LocalSend used to be optional: it is always on now (it also finds
-    /// friends on the local network). Kept on, for an older version.
+    /// LocalSend used to be optional on its own: it now follows
+    /// `local_network`. Kept on, for an older version.
     #[serde(default = "enabled")]
     localsend: bool,
+    /// The app's own use of the local network: LocalSend (which also finds
+    /// friends there, without the internet) and the fast path between
+    /// friends. Read at start (`set_local_network` restarts).
+    #[serde(default = "enabled")]
+    local_network: bool,
     /// The first-launch welcome was shown.
     #[serde(default)]
     welcomed: bool,
@@ -707,6 +712,29 @@ async fn set_relay(
     restart_app(&app);
 }
 
+/// Saves whether the app uses the local network (see `Config::local_network`)
+/// and restarts it to apply that.
+#[tauri::command]
+async fn set_local_network(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    enable: bool,
+) -> Result<(), String> {
+    {
+        let mut config = state.config();
+        if config.data.local_network == enable {
+            return Ok(());
+        }
+        config.data.local_network = enable;
+        // Restarting without it saved would silently drop the setting.
+        config
+            .save_now()
+            .map_err(|e| format!("Enregistrement du réglage impossible : {e}"))?;
+    }
+    std::env::set_var(SHOW_AFTER_RESTART, "1");
+    restart_app(&app);
+}
+
 #[tauri::command]
 async fn select_download_dir(
     app: AppHandle,
@@ -1197,11 +1225,13 @@ fn get_localsend_status(state: State<AppState>) -> Value {
 }
 
 fn localsend_status(state: &AppState) -> Value {
+    // Before taking the slot: never both locks at once.
+    let off = !state.config().data.local_network;
     let slot = state.localsend();
     match (&slot.service, &slot.error) {
         (Some(service), _) => json!({ "running": true, "status": service.status() }),
         (None, Some(error)) => json!({ "running": false, "error": error }),
-        (None, None) => json!({ "running": false }),
+        (None, None) => json!({ "running": false, "off": off }),
     }
 }
 
@@ -2218,7 +2248,7 @@ fn load_identity(path: &Path) -> std::io::Result<SecretKey> {
                 let message = if e.kind() == ErrorKind::InvalidData {
                     format!(
                         "votre identité ne peut pas être déchiffrée sur cette session ({e}). \
-                         Restaurez une sauvegarde (Paramètres → Sauvegarde) pour retrouver votre ID."
+                         Restaurez une sauvegarde (Paramètres → Avancé) pour retrouver votre ID."
                     )
                 } else {
                     format!(
@@ -2307,6 +2337,7 @@ fn setup(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
             relay_url: String::new(),
             relay_token: String::new(),
             localsend: true,
+            local_network: true,
             welcomed: false,
             dnd_until: 0,
             read_receipts: true,
@@ -2322,6 +2353,7 @@ fn setup(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
         log_save(config.save_now());
     }
     let auto_launch = config.data.auto_launch;
+    let local_network = config.data.local_network;
     config.data.localsend = true;
     let nickname = config.data.nickname.clone();
     let relay = if config.data.relay_url.is_empty() {
@@ -2377,9 +2409,13 @@ fn setup(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
         relay,
         // A certificate of its own, not LocalSend's: not linked to what this
         // computer announces to every LocalSend device.
-        lan: localsend::Identity::load_or_create(&dir.join("lan.json"))
-            .inspect_err(|e| eprintln!("local network fast path off: {e}"))
-            .ok(),
+        lan: if local_network {
+            localsend::Identity::load_or_create(&dir.join("lan.json"))
+                .inspect_err(|e| eprintln!("local network fast path off: {e}"))
+                .ok()
+        } else {
+            None
+        },
     }))?;
     {
         let config = config.lock().unwrap_or_else(|e| e.into_inner());
@@ -2403,7 +2439,8 @@ fn setup(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     let dnd_until = app.state::<AppState>().config().data.dnd_until;
     apply_dnd(app, dnd_until);
     watch_system(app);
-    {
+    // Turned off: nothing announced or listened to on the local network.
+    if local_network {
         // In the background: the port may take a moment to give up on.
         let app = app.clone();
         tauri::async_runtime::spawn(async move {
@@ -2530,7 +2567,13 @@ pub fn run() {
                 MacosLauncher::LaunchAgent,
                 Some(vec![HIDDEN_ARG]),
             ))
-            .plugin(tauri_plugin_updater::Builder::new().build());
+            .plugin(
+                tauri_plugin_updater::Builder::new()
+                    .default_version_comparator(|current, release| {
+                        update::is_newer(&current, &release.version)
+                    })
+                    .build(),
+            );
     }
     #[cfg(target_os = "android")]
     {
@@ -2592,6 +2635,7 @@ pub fn run() {
             set_nickname,
             get_relay_status,
             set_relay,
+            set_local_network,
             get_localsend_status,
             get_localsend_chats,
             get_localsend_chat,

@@ -54,9 +54,31 @@ mod imp {
             .unwrap_or_default()
     }
 
+    /// A version as shown: its optional fourth number is semver build
+    /// metadata in the files (`3.4.7+2`, which Cargo, npm and Tauri take),
+    /// shown as one, as in the tags and CHANGELOG.md (3.4.7.2).
+    fn shown(version: &str) -> String {
+        match version.split_once('+') {
+            Some((base, n)) if !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) => {
+                format!("{base}.{n}")
+            }
+            _ => version.to_string(),
+        }
+    }
+
+    /// The updater's test: semver precedence, then the fourth number, which
+    /// precedence leaves out (3.4.7.2 comes after 3.4.7).
+    pub fn is_newer(current: &semver::Version, release: &semver::Version) -> bool {
+        let fourth = |v: &semver::Version| v.build.as_str().parse::<u64>().unwrap_or(0);
+        release
+            .cmp_precedence(current)
+            .then_with(|| fourth(release).cmp(&fourth(current)))
+            .is_gt()
+    }
+
     fn view(app: &AppHandle, update: &Update) -> UpdateView {
         UpdateView {
-            version: update.version.clone(),
+            version: shown(&update.version),
             notes: update.body.clone().filter(|b| !b.trim().is_empty()),
             failed: failed_version(app) == update.version,
         }
@@ -250,6 +272,26 @@ mod imp {
             install_when_idle(&app);
         }
         enable
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn fourth_number() {
+            let v = |s: &str| semver::Version::parse(s).unwrap();
+            assert!(is_newer(&v("3.4.7"), &v("3.4.7+2")));
+            assert!(is_newer(&v("3.4.7+2"), &v("3.4.7+10")));
+            assert!(is_newer(&v("3.4.7+9"), &v("3.4.8")));
+            assert!(is_newer(&v("3.4.6"), &v("3.4.7")));
+            assert!(!is_newer(&v("3.4.7+2"), &v("3.4.7")));
+            assert!(!is_newer(&v("3.4.7"), &v("3.4.7")));
+            assert!(!is_newer(&v("3.4.7"), &v("3.4.7-beta.1")));
+            assert_eq!(shown("3.4.7+2"), "3.4.7.2");
+            assert_eq!(shown("3.4.7"), "3.4.7");
+            assert_eq!(shown("3.4.7-beta.1"), "3.4.7-beta.1");
+        }
     }
 }
 

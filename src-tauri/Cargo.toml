@@ -1,6 +1,6 @@
 [package]
 name = "p2pshare"
-version = "3.4.6"
+version = "3.4.7"
 description = "Partage de fichiers et chat en pair-à-pair"
 authors = ["lamzii"]
 license = "MIT"
@@ -75,6 +75,8 @@ tauri-plugin-autostart = "2"
 # A link clicked while the app runs reaches it, not a second one.
 tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
 tauri-plugin-updater = "2"
+# Already built for the updater: its versions, compared with a fourth number.
+semver = "1"
 
 [target.'cfg(not(any(windows, target_os = "android", target_os = "ios")))'.dependencies]
 notify-rust = "4"

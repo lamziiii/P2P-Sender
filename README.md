@@ -37,6 +37,12 @@ The installers are not signed yet: Windows SmartScreen may ask you to confirm, a
 
 The full list of changes, for users and in French, is in [CHANGELOG.md](CHANGELOG.md); the app shows it after each update and in Settings → À propos.
 
+## What's new in 3.4.7 (in progress)
+
+- **Local network off switch**: Settings → Réseau → Réseau local turns off the app's own use of the local network: LocalSend (announcements, server, nearby devices), finding friends there without the internet, and the fast path between friends. Friends on the same network are then reached through iroh only. The setting is read at start, so changing it restarts the app (`set_local_network`, `localNetwork` in `config.json`).
+- **Backup moves to Settings → Avancé**, with the P2P ID.
+- **Versions with a fourth number** (3.4.7.2) can be released: see "Release" below.
+
 ## What's new in 3.4.6
 
 - **Invitation links** instead of exchanging IDs: Friends tab → + → create a link, send it by mail or message. Clicking it opens P2P Share, which asks whether to add whoever sent it; both become friends, nobody types an ID. A link works for one person, for 7 days; pasted in the Friends tab when clicking does not open the app. Your ID moves to Settings → Avancé, with adding by ID, for friends on 3.4.5 or older.
@@ -74,7 +80,7 @@ Friends on 3.3 can still talk to you: they receive pictures as plain files and f
 
 ### Faster transfers on the local network
 
-When you send a file to a friend on the same network, its bytes now go over a direct TCP + TLS connection instead of QUIC through iroh. This is the same kind of connection LocalSend uses, and it is faster: 194 MB/s instead of 132 MB/s for 1 GB between two instances on one computer. It happens on its own, nothing to set up:
+When you send a file to a friend on the same network, its bytes now go over a direct TCP + TLS connection instead of QUIC through iroh. This is the same kind of connection LocalSend uses, and it is faster: 194 MB/s instead of 132 MB/s for 1 GB between two instances on one computer. It happens on its own, nothing to set up (turning the local network off in the settings stops it):
 
 - Friends tell each other, over their authenticated iroh connection, the fingerprint of a certificate kept for this (`lan.json` in the app data folder), a port and their private IPv4 addresses.
 - The sender connects to an address of the friend on one of its own networks. Each side checks the other's certificate against the fingerprint it was told, so nobody else on the network can read the file or pass for your friend.
@@ -88,7 +94,7 @@ Each LocalSend device in the Friends tab now has a chat. Text sent from the Loca
 
 ## LocalSend compatibility
 
-LocalSend compatibility is always on: the app exchanges files and text with the LocalSend app on the same network.
+LocalSend compatibility is on unless the local network is turned off in the settings (Réseau → Réseau local): the app exchanges files and text with the LocalSend app on the same network.
 
 - The computer shows up in LocalSend under your nickname. Each incoming file is offered for you to accept, like files from friends.
 - The devices found appear in the Friends tab, to send them files or open their chat. When we send, the device's certificate must match the fingerprint it announced.
@@ -144,7 +150,7 @@ The app and its installer are copied to `release/`. Cargo's working files go to 
 
 ### Release
 
-Set the version with `npm version <x.y.z> --no-git-tag-version` (package.json and its lock), the same in `src-tauri/tauri.conf.json` and `src-tauri/Cargo.toml`, then `cargo update -p p2pshare --offline` in `src-tauri` (builds use `--locked`). Push a version tag (`git tag v3.4.6 && git push origin v3.4.6`): GitHub Actions checks that the tag matches that version, builds the installers for the three systems and the APK, signs the update files, publishes the release with `latest.json` last (what installed apps read to update), then submits the new version to winget (see `.github/workflows/build.yml`). A stable release stops before publishing if the APK or the update signing key is missing, and before building if `CHANGELOG.md` has no `## x.y.z — <date>` section for it (until the release, the section of the next version says « à venir » instead of the date): that section becomes the release notes, the notes shown before installing an update, and what the app shows once updated. A prerelease tag (`v3.4.0-beta.1`) is published as a prerelease, not marked latest, and not sent to winget. The winget step needs a `WINGET_TOKEN` secret: a classic GitHub token with the `public_repo` scope.
+Set the version with `npm run set-version <x.y.z>`: it writes it in package.json and its lock, `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml` and `Cargo.lock` (builds use `--locked`). A fourth number is optional (`npm run set-version 3.4.7.2`, from .1): Cargo, npm and Tauri take three numbers only, so the files hold `3.4.7+2` (semver build metadata, which Tauri also turns into the Windows version 3.4.7.2), while the tag, `CHANGELOG.md`, the app, the release files and winget say 3.4.7.2, and the updater counts it as newer than 3.4.7. Push a version tag (`git tag v3.4.7 && git push origin v3.4.7`, or `v3.4.7.2`): GitHub Actions checks that the tag matches that version, builds the installers for the three systems and the APK, signs the update files, publishes the release with `latest.json` last (what installed apps read to update), then submits the new version to winget (see `.github/workflows/build.yml`). A stable release stops before publishing if the APK or the update signing key is missing, and before building if `CHANGELOG.md` has no `## x.y.z — <date>` section for it (until the release, the section of the next version says « à venir » instead of the date): that section becomes the release notes, the notes shown before installing an update, and what the app shows once updated. A prerelease tag (`v3.4.0-beta.1`) is published as a prerelease, not marked latest, and not sent to winget. The winget step needs a `WINGET_TOKEN` secret: a classic GitHub token with the `public_repo` scope.
 
 ### Invitation links
 

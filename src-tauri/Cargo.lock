@@ -3906,7 +3906,7 @@ dependencies = [
 
 [[package]]
 name = "p2pshare"
-version = "3.4.6"
+version = "3.4.7"
 dependencies = [
  "base64 0.22.1",
  "blake3",
@@ -3926,6 +3926,7 @@ dependencies = [
  "ring",
  "rustls",
  "security-framework",
+ "semver",
  "serde",
  "serde_json",
  "socket2",

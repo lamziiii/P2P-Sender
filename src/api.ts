@@ -98,6 +98,8 @@ export type Config = {
   nickname: string;
   relayUrl: string;
   relayToken: string;
+  // LocalSend, friends found on the local network and the fast path there.
+  localNetwork?: boolean;
   // Desktop: newer versions install by themselves.
   autoUpdate?: boolean;
   // The first-launch welcome was shown.
@@ -150,7 +152,8 @@ export type LocalSendChat = { fingerprint: string; alias: string; unread: number
 
 export type LocalSendStatus =
   | { running: true; status: { port: number; alias: string; fingerprint: string; error?: string } }
-  | { running: false; error?: string };
+  // off: the local network is turned off in the settings.
+  | { running: false; error?: string; off?: boolean };
 
 export type GroupSummary = {
   id: string;
@@ -378,6 +381,8 @@ export const api = {
   onUpdateError: on<string>('update-error'),
   // Restarts the app when the setting changes.
   setRelay: (url: string, token: string) => invoke<void>('set_relay', { url, token }),
+  // The same: LocalSend, friends found nearby and the fast path, on or off.
+  setLocalNetwork: (enable: boolean) => invoke<void>('set_local_network', { enable }),
   getLocalSendStatus: () => invoke<LocalSendStatus>('get_localsend_status'),
   getLocalSendChats: () => invoke<LocalSendChat[]>('get_localsend_chats'),
   getLocalSendChat: (fingerprint: string) =>

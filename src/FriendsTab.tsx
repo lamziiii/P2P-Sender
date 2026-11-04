@@ -52,11 +52,13 @@ function RenameDialog({ friend, onDone }: { friend: Friend; onDone: (friends?: F
   );
 }
 
-export function FriendsTab({ friends, unread, dropTarget, onFriends, onOpenInvite, onOpenChat, onSendFile, onSendFolder, onRemove, onLocalSendSent, onOpenLocalSendChat, mutedFriends, onMuted }: {
+export function FriendsTab({ friends, unread, dropTarget, localNetwork, onFriends, onOpenInvite, onOpenChat, onSendFile, onSendFolder, onRemove, onLocalSendSent, onOpenLocalSendChat, mutedFriends, onMuted }: {
   friends: Friend[];
   unread: Unread;
   // Where files dragged over the window would go.
   dropTarget: DropTarget | null;
+  // Off in the settings: no LocalSend devices.
+  localNetwork: boolean;
   onFriends: (friends: Friend[]) => void;
   // A link pasted: asked about like one that opened the app.
   onOpenInvite: (invite: InviteLink) => void;
@@ -221,11 +223,13 @@ export function FriendsTab({ friends, unread, dropTarget, onFriends, onOpenInvit
       )}
       {query && shown.length === 0 && <div className="setting-sub" style={{ textAlign: 'center' }}>Aucun ami ne correspond.</div>}
 
-      <LocalSendDevices
-        dropTarget={dropTarget?.kind === 'localsend' ? dropTarget.id : null}
-        onSent={onLocalSendSent}
-        onOpenChat={onOpenLocalSendChat}
-      />
+      {localNetwork && (
+        <LocalSendDevices
+          dropTarget={dropTarget?.kind === 'localsend' ? dropTarget.id : null}
+          onSent={onLocalSendSent}
+          onOpenChat={onOpenLocalSendChat}
+        />
+      )}
 
       {renaming && (
         <RenameDialog

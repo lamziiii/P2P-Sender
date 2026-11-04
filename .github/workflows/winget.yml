@@ -16,7 +16,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Release tag (v1.2.3)'
+        description: 'Release tag (v1.2.3 or v1.2.3.4)'
         required: true
   workflow_call:
     inputs:
@@ -54,8 +54,9 @@ jobs:
             Write-Output "::notice::WINGET_TOKEN is not set: winget not updated"
             exit 0
           }
-          # Prereleases (v1.2.3-beta.1) do not go to winget.
-          if ($env:TAG -notmatch '^v\d+\.\d+\.\d+$') {
+          # Prereleases (v1.2.3-beta.1) do not go to winget; a fourth number
+          # (v1.2.3.4) does, winget versions take it as it is.
+          if ($env:TAG -notmatch '^v\d+\.\d+\.\d+(\.\d+)?$') {
             Write-Output "::error::Not a release version tag: $env:TAG"
             exit 1
           }
