@@ -1,28 +1,28 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { api } from './api';
-import type { LocalSendDevice, LocalSendMessage, NotifySettings } from './api';
+import type { LocalSendDevice, LocalSendMessage } from './api';
 import { ChatInput, PendingMark } from './chatParts';
 import { chatRows } from './chatRows';
-import { formatTime } from './format';
+import { formatTime, plural } from './format';
 import { Icon } from './icons';
 import { WindowButtons } from './PinButton';
+import { isMobile } from './platform';
 import { RichText } from './RichText';
 
 const MAX_TEXT = 5000;
 
 // The chat with a LocalSend device: text sent from its LocalSend app lands
 // here, and what is written here reaches it as a LocalSend text message.
-export function LocalSendChatView({ fingerprint, notice, dropping, onBack, muted, onMuted }: {
-  // Its messages give no notification, and to change it.
-  muted: boolean;
-  onMuted: (settings: NotifySettings) => void;
+// Notifications and deletion are in the device's menu, as for a friend.
+export function LocalSendChatView({ fingerprint, notice, dropping, onBack, onToast }: {
   // Files are dragged over the window: they go to this device.
   dropping?: boolean;
   fingerprint: string;
   // Offers shown above the chat, as in the other views.
   notice: ReactNode[];
   onBack: () => void;
+  onToast: (text: string) => void;
 }) {
   const [alias, setAlias] = useState('');
   const [messages, setMessages] = useState<LocalSendMessage[]>([]);
@@ -113,6 +113,17 @@ export function LocalSendChatView({ fingerprint, notice, dropping, onBack, muted
     }
   };
 
+  // Files only: LocalSend gets no folders from here.
+  const attachFiles = async () => {
+    setError('');
+    try {
+      const count = await api.sendToLocalSend(fingerprint);
+      if (count > 0) onToast(`${plural(count, 'fichier envoyé', 'fichiers envoyés')} à ${name} : suivez l’envoi dans l’onglet Transferts.`);
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
   return (
     <div className={`app ${dropping ? 'dropping' : ''}`}>
       <div className="header">
@@ -129,13 +140,6 @@ export function LocalSendChatView({ fingerprint, notice, dropping, onBack, muted
           </div>
         </div>
         <div className="header-actions">
-          <button
-            className={`icon-btn ${muted ? 'active' : ''}`}
-            title={muted ? 'Réactiver les notifications' : 'Désactiver les notifications'}
-            onClick={async () => onMuted(await api.setChatMuted('localsend', fingerprint, !muted))}
-          >
-            <Icon name={muted ? 'bellOff' : 'bell'} />
-          </button>
           <WindowButtons />
         </div>
       </div>
@@ -146,7 +150,9 @@ export function LocalSendChatView({ fingerprint, notice, dropping, onBack, muted
         {messages.length === 0 && (
           <div className="empty-state">
             <Icon name="chat" size={32} />
-            Aucun message. Le texte envoyé depuis LocalSend sur cet appareil arrivera ici.
+            {isMobile
+              ? 'Aucun message. Le texte envoyé depuis LocalSend sur cet appareil arrivera ici.'
+              : 'Aucun message. Le texte envoyé depuis LocalSend sur cet appareil arrivera ici. Glissez un fichier ici pour le lui envoyer.'}
           </div>
         )}
         {rows}
@@ -160,6 +166,16 @@ export function LocalSendChatView({ fingerprint, notice, dropping, onBack, muted
         placeholder={device ? 'Écrire un message…' : 'Appareil introuvable : ouvrez LocalSend dessus'}
         maxLength={MAX_TEXT}
         error={error}
+        before={
+          <button
+            className="icon-btn attach"
+            title={device ? 'Envoyer un fichier' : 'Appareil introuvable sur le réseau'}
+            disabled={!device}
+            onClick={attachFiles}
+          >
+            <Icon name="paperclip" />
+          </button>
+        }
       />
     </div>
   );

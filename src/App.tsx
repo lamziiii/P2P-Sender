@@ -671,8 +671,7 @@ function App() {
         notice={notices}
         dropping={dragging}
         onBack={() => setActiveTab('friends')}
-        muted={config.notifications?.mutedLocalsend.includes(lsChat) ?? false}
-        onMuted={notifications => setConfig(c => ({ ...c, notifications }))}
+        onToast={showToast}
       />
     );
   }
@@ -795,6 +794,7 @@ function App() {
             onLocalSendSent={() => setActiveTab('transfers')}
             onOpenLocalSendChat={openLocalSendChat}
             mutedFriends={config.notifications?.mutedFriends ?? []}
+            mutedLocalsend={config.notifications?.mutedLocalsend ?? []}
             onMuted={notifications => setConfig(c => ({ ...c, notifications }))}
           />
         )}

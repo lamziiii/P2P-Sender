@@ -3,8 +3,9 @@ import { api } from './api';
 import { Icon } from './icons';
 import { isMobile } from './platform';
 
-// Keeps the window open when another window takes the focus (it goes away
-// then, like the OneDrive flyout): to drag files from the file explorer.
+// Keeps the window open, above the others, when another window takes the
+// focus (it goes away then, like the OneDrive flyout): to drag files from the
+// file explorer.
 export function PinButton() {
   const [pinned, setPinned] = useState(false);
 
@@ -19,7 +20,7 @@ export function PinButton() {
   return (
     <button
       className={`icon-btn ${pinned ? 'active' : ''}`}
-      title={pinned ? 'Ne plus garder ouvert' : 'Garder ouvert (pour glisser des fichiers depuis l’Explorateur)'}
+      title={pinned ? 'Ne plus garder ouvert' : 'Garder ouvert au premier plan (pour y glisser des fichiers)'}
       aria-pressed={pinned}
       onClick={toggle}
     >

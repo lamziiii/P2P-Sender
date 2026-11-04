@@ -1357,6 +1357,18 @@ fn mark_localsend_read(app: AppHandle, state: State<AppState>, fingerprint: Stri
     }
 }
 
+/// Forget a device's chat, here only (the device keeps its own). A device
+/// still on the network stays listed; one away is no longer.
+#[tauri::command]
+fn delete_localsend_chat(app: AppHandle, state: State<AppState>, fingerprint: String) {
+    let mut chats = state.localsend_chats();
+    if chats.data.remove(&fingerprint).is_some() {
+        chats.mark_dirty();
+        drop(chats);
+        state.localsend_chats_changed(&app);
+    }
+}
+
 /// Send text to a device's chat; it shows as pending until the device has it.
 #[tauri::command]
 fn send_localsend_text(
@@ -1681,8 +1693,16 @@ fn on_focus_lost(app: &AppHandle) {
 }
 
 #[tauri::command]
-fn set_window_pinned(pinned: bool) -> bool {
+fn set_window_pinned(app: AppHandle, pinned: bool) -> bool {
     PINNED.store(pinned, Ordering::SeqCst);
+    // Pinned, it also stays above the window that takes the focus (the file
+    // explorer files are dragged from).
+    #[cfg(desktop)]
+    if let Some(w) = main_window(&app) {
+        let _ = w.set_always_on_top(pinned);
+    }
+    #[cfg(mobile)]
+    let _ = app;
     pinned
 }
 
@@ -1731,6 +1751,8 @@ fn show_window(app: &AppHandle) -> bool {
         if w.is_minimized().unwrap_or(false) {
             let _ = w.unminimize();
         }
+        // A window rebuilt from the tray keeps the pin.
+        let _ = w.set_always_on_top(PINNED.load(Ordering::SeqCst));
         position_window(&w);
     }
     let _ = w.show();
@@ -2640,6 +2662,7 @@ pub fn run() {
             get_localsend_chats,
             get_localsend_chat,
             mark_localsend_read,
+            delete_localsend_chat,
             send_localsend_text,
             get_localsend_devices,
             scan_localsend,

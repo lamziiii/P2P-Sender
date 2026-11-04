@@ -52,7 +52,7 @@ function RenameDialog({ friend, onDone }: { friend: Friend; onDone: (friends?: F
   );
 }
 
-export function FriendsTab({ friends, unread, dropTarget, localNetwork, onFriends, onOpenInvite, onOpenChat, onSendFile, onSendFolder, onRemove, onLocalSendSent, onOpenLocalSendChat, mutedFriends, onMuted }: {
+export function FriendsTab({ friends, unread, dropTarget, localNetwork, onFriends, onOpenInvite, onOpenChat, onSendFile, onSendFolder, onRemove, onLocalSendSent, onOpenLocalSendChat, mutedFriends, mutedLocalsend, onMuted }: {
   friends: Friend[];
   unread: Unread;
   // Where files dragged over the window would go.
@@ -67,15 +67,22 @@ export function FriendsTab({ friends, unread, dropTarget, localNetwork, onFriend
   onSendFolder: (id: string) => void;
   onRemove: (friend: Friend) => void;
   onLocalSendSent: () => void;
-  // Friends whose messages give no notification, and to change it.
+  // Friends and LocalSend devices whose messages give no notification, and to change it.
   mutedFriends: string[];
+  mutedLocalsend: string[];
   onMuted: (settings: NotifySettings) => void;
   onOpenLocalSendChat: (fingerprint: string) => void;
 }) {
   const [adding, setAdding] = useState(false);
   const [search, setSearch] = useState('');
-  // The friend whose menu is open, and where (on the window: the list clips its rows).
-  const [menu, setMenu] = useState<{ id: string; top: number; right: number } | null>(null);
+  // The friend whose menu is open (sending or more options), and where (on
+  // the window: the list clips its rows).
+  const [menu, setMenu] = useState<{ id: string; kind: 'send' | 'more'; top: number; right: number } | null>(null);
+  // A second click on the same button closes its menu.
+  const openMenu = (id: string, kind: 'send' | 'more', button: HTMLElement) => {
+    const r = button.getBoundingClientRect();
+    setMenu(menu?.id === id && menu.kind === kind ? null : { id, kind, top: r.bottom + 4, right: window.innerWidth - r.right });
+  };
   const [renaming, setRenaming] = useState<Friend | null>(null);
   // False once the backend said it cannot send folders (Android).
   const folders = useFoldersSupported();
@@ -167,7 +174,30 @@ export function FriendsTab({ friends, unread, dropTarget, localNetwork, onFriend
                 </div>
                 <div className="item-actions" onClick={e => e.stopPropagation()}>
                   {!f.legacy && (
-                    <button className="icon-btn" title="Envoyer un fichier" onClick={() => onSendFile(f.id)}><Icon name="fileUp" /></button>
+                    <div className="menu-anchor">
+                      <button
+                        className={`icon-btn ${menu?.id === f.id && menu.kind === 'send' ? 'active' : ''}`}
+                        title={folders ? 'Envoyer un fichier ou un dossier' : 'Envoyer un fichier'}
+                        onClick={e => {
+                          e.stopPropagation();
+                          // Files only: no menu to choose.
+                          if (!folders) {
+                            setMenu(null);
+                            onSendFile(f.id);
+                            return;
+                          }
+                          openMenu(f.id, 'send', e.currentTarget);
+                        }}
+                      >
+                        <Icon name="fileUp" />
+                      </button>
+                      {menu?.id === f.id && menu.kind === 'send' && (
+                        <div className="menu-popover" role="menu" ref={fitOnScreen} style={{ top: menu.top, right: menu.right }}>
+                          <button role="menuitem" onClick={() => { setMenu(null); onSendFile(f.id); }}><Icon name="file" size={14} />Fichier</button>
+                          <button role="menuitem" onClick={() => { setMenu(null); onSendFolder(f.id); }}><Icon name="folder" size={14} />Dossier</button>
+                        </div>
+                      )}
+                    </div>
                   )}
                   <div className="menu-anchor">
                     <button
@@ -175,17 +205,13 @@ export function FriendsTab({ friends, unread, dropTarget, localNetwork, onFriend
                       title="Plus d’options"
                       onClick={e => {
                         e.stopPropagation();
-                        const r = e.currentTarget.getBoundingClientRect();
-                        setMenu(menu?.id === f.id ? null : { id: f.id, top: r.bottom + 4, right: window.innerWidth - r.right });
+                        openMenu(f.id, 'more', e.currentTarget);
                       }}
                     >
                       <Icon name="more" />
                     </button>
-                    {menu?.id === f.id && (
+                    {menu?.id === f.id && menu.kind === 'more' && (
                       <div className="menu-popover" role="menu" ref={fitOnScreen} style={{ top: menu.top, right: menu.right }}>
-                        {!f.legacy && folders && (
-                          <button role="menuitem" onClick={() => { setMenu(null); onSendFolder(f.id); }}><Icon name="folder" size={14} />Envoyer un dossier</button>
-                        )}
                         {!f.legacy && (
                           <button
                             role="menuitemcheckbox"
@@ -228,6 +254,8 @@ export function FriendsTab({ friends, unread, dropTarget, localNetwork, onFriend
           dropTarget={dropTarget?.kind === 'localsend' ? dropTarget.id : null}
           onSent={onLocalSendSent}
           onOpenChat={onOpenLocalSendChat}
+          muted={mutedLocalsend}
+          onMuted={onMuted}
         />
       )}
 

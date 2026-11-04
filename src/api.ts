@@ -388,6 +388,8 @@ export const api = {
   getLocalSendChat: (fingerprint: string) =>
     invoke<{ alias: string; messages: LocalSendMessage[] }>('get_localsend_chat', { fingerprint }),
   markLocalSendRead: (fingerprint: string) => { invoke('mark_localsend_read', { fingerprint }); },
+  // Here only: the device keeps its own messages.
+  deleteLocalSendChat: (fingerprint: string) => invoke<void>('delete_localsend_chat', { fingerprint }),
   // Resolves to the message, shown as pending until the device has it.
   sendLocalSendText: (fingerprint: string, text: string) =>
     invoke<LocalSendMessage>('send_localsend_text', { fingerprint, text }),
