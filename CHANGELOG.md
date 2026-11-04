@@ -1,6 +1,6 @@
 # Nouveautés de P2P Share
 
-## 3.4.7 — à venir
+## 3.4.7 — 4 novembre 2026
 
 - **Réseau local désactivable** : dans Paramètres → Réseau, un bouton coupe l'usage du réseau local par l'app. Vous n'y êtes plus visible, LocalSend s'arrête, et vos amis sur le même réseau ne sont plus joints que par Internet, sans la connexion plus rapide. L'app redémarre pour appliquer le changement.
 - **La sauvegarde passe dans Paramètres → Avancé**, avec votre identifiant P2P.

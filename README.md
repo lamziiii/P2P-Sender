@@ -37,7 +37,7 @@ The installers are not signed yet: Windows SmartScreen may ask you to confirm, a
 
 The full list of changes, for users and in French, is in [CHANGELOG.md](CHANGELOG.md); the app shows it after each update and in Settings → À propos.
 
-## What's new in 3.4.7 (in progress)
+## What's new in 3.4.7
 
 - **Local network off switch**: Settings → Réseau → Réseau local turns off the app's own use of the local network: LocalSend (announcements, server, nearby devices), finding friends there without the internet, and the fast path between friends. Friends on the same network are then reached through iroh only. The setting is read at start, so changing it restarts the app (`set_local_network`, `localNetwork` in `config.json`).
 - **Backup moves to Settings → Avancé**, with the P2P ID.
