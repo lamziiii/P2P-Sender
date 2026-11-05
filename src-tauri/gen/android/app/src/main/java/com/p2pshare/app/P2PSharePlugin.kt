@@ -13,6 +13,7 @@ import android.net.Uri
 import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Environment
+import android.os.PowerManager
 import android.os.Process
 import android.provider.OpenableColumns
 import android.security.keystore.KeyGenParameterSpec
@@ -109,6 +110,9 @@ class P2PSharePlugin(activity: Activity) : Plugin(activity) {
     /** Events the Rust side has not heard yet (sent once it listens). */
     private val pending = ArrayList<JSObject>()
     private var multicast: WifiManager.MulticastLock? = null
+    /** Held while files move (see setTransferring). */
+    private var wifiLock: WifiManager.WifiLock? = null
+    private var wakeLock: PowerManager.WakeLock? = null
     private val notificationIds = AtomicInteger(1000)
 
     private fun send(event: JSObject) {
@@ -214,6 +218,42 @@ class P2PSharePlugin(activity: Activity) : Plugin(activity) {
           setReferenceCounted(false)
           acquire()
         }
+      }
+    }
+    invoke.resolve()
+  }
+
+  /**
+   * While files move, Android must not slow the Wi-Fi down or put the
+   * processor to sleep, as it does to save battery (screen off above all).
+   */
+  @Suppress("DEPRECATION", "WakelockTimeout")
+  @Command
+  fun setTransferring(invoke: Invoke) {
+    val args = invoke.parseArgs(EnabledArgs::class.java)
+    synchronized(lock) {
+      if (args.enabled) {
+        if (wifiLock == null) {
+          val wifi = context.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+          // High performance is gone from Android 14: low latency took its place.
+          val mode = if (Build.VERSION.SDK_INT >= 34) WifiManager.WIFI_MODE_FULL_LOW_LATENCY else WifiManager.WIFI_MODE_FULL_HIGH_PERF
+          wifiLock = wifi?.createWifiLock(mode, "p2pshare-transfer")?.apply {
+            setReferenceCounted(false)
+            acquire()
+          }
+        }
+        if (wakeLock == null) {
+          val power = context.getSystemService(Context.POWER_SERVICE) as? PowerManager
+          wakeLock = power?.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "p2pshare:transfer")?.apply {
+            setReferenceCounted(false)
+            acquire()
+          }
+        }
+      } else {
+        wifiLock?.takeIf { it.isHeld }?.release()
+        wifiLock = null
+        wakeLock?.takeIf { it.isHeld }?.release()
+        wakeLock = null
       }
     }
     invoke.resolve()

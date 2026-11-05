@@ -1,5 +1,16 @@
 # Nouveautés de P2P Share
 
+## 3.4.8.5 — 5 novembre 2026
+
+- **Les transferts reprennent après un redémarrage** : un envoi ou une réception en cours avec un ami continue là où il s'était arrêté quand vous relancez l'app ou l'ordinateur, sans tout recommencer. Si le fichier envoyé a été modifié entre-temps, il ne reprend pas.
+- **Un lien d'invitation vous ajoute directement** : en cliquant sur le lien d'un ami, P2P Share s'ouvre et l'ajoute à vos amis, sans question à valider. Si l'app n'est pas installée, la page vous propose de l'installer.
+- **Coller pour envoyer** : collez une capture d'écran ou des fichiers copiés (Ctrl+V) dans une discussion, ils partent comme si vous les y aviez glissés.
+- **Plus rapide sur le réseau local** : quand le pare-feu d'un des deux appareils bloque la connexion directe, l'autre l'établit à sa place. Un fichier commencé par Internet passe sur le réseau local dès que votre ami y est trouvé. Sur Android, le Wi-Fi reste à pleine vitesse pendant les transferts, même écran éteint.
+- **Linux** : un paquet `.deb` pour Debian et Ubuntu, en plus de l'AppImage. Il installe l'app dans le menu des applications et se met à jour tout seul, en demandant votre mot de passe.
+- **Windows** : à la première installation, l'installeur demande une seule fois l'autorisation d'ouvrir le pare-feu à l'app, sur tous les réseaux, y compris publics (Wi-Fi d'école ou de gare). Installer une nouvelle version par-dessus l'ancienne ne remet plus le raccourci du bureau si vous l'aviez supprimé (à partir de la mise à jour suivante).
+
+La reprise après redémarrage et la connexion dans les deux sens demandent la 3.4.8.5 des deux côtés ; avec un ami en version plus ancienne, tout marche comme avant.
+
 ## 3.4.8 — 4 novembre 2026
 
 - **Les appareils LocalSend se présentent comme vos amis** : un clic ouvre la discussion, avec le dernier message, l'heure et les messages non lus. Le bouton d'envoi de fichiers reste sur la ligne, et le menu « … » permet de couper les notifications et de supprimer la discussion. Elle n'est effacée que chez vous : les messages restent dans l'app LocalSend de l'autre appareil. Dans la discussion, le trombone envoie un fichier.

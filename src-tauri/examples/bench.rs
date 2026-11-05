@@ -48,6 +48,7 @@ async fn main() {
     let (tx, mut events) = mpsc::unbounded_channel();
     let started = Instant::now();
     let node = Node::start(Options {
+        kept: JsonStore::read_only(Default::default(), Vec::new()),
         secret: SecretKey::generate(),
         friends: JsonStore::load(work.join(format!("{role}-v3-friends.json")), Vec::new()),
         invites: JsonStore::load(work.join(format!("{role}-v3-invites.json")), Vec::new()),

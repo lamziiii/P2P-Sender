@@ -36,6 +36,7 @@ async fn main() {
     let counted = events.clone();
     let downloads = dir.join("downloads");
     let node = Node::start(Options {
+        kept: JsonStore::read_only(Default::default(), Vec::new()),
         secret: SecretKey::generate(),
         friends: JsonStore::load(dir.join("friends.json"), Vec::new()),
         invites: JsonStore::load(dir.join("invites.json"), Vec::new()),

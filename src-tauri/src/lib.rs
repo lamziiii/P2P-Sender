@@ -13,7 +13,7 @@ pub mod vault;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 #[cfg(desktop)]
@@ -1309,6 +1309,75 @@ async fn send_localsend_paths(
     Ok(json!({ "sent": sent, "skipped": rest.len() }))
 }
 
+/// Where files pasted in a chat are kept, each in its own folder so that its
+/// name stays as it was.
+const PASTED_DIR: &str = "pasted";
+/// A pasted file is kept this long, for transfers that wait or resume.
+const PASTED_KEEP: Duration = Duration::from_secs(30 * 24 * 3600);
+
+/// Keep a file pasted in a chat (a screenshot…), to send it as a dropped one.
+/// The body is its bytes, the `x-name` header its name (URI-encoded).
+#[tauri::command]
+fn save_pasted(state: State<AppState>, request: tauri::ipc::Request) -> Result<String, String> {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let tauri::ipc::InvokeBody::Raw(data) = request.body() else {
+        return Err("Fichier collé illisible".into());
+    };
+    let name = request
+        .headers()
+        .get("x-name")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| {
+            url::form_urlencoded::parse(format!("n={v}").as_bytes())
+                .next()
+                .map(|(_, n)| n.into_owned())
+        })
+        .unwrap_or_default();
+    let folder = state.data_dir.join(PASTED_DIR).join(format!(
+        "{}-{}",
+        now_ms(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
+    let path = folder.join(pasted_name(&name));
+    std::fs::write(&path, data).map_err(|e| e.to_string())?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
+/// A file name that is valid everywhere, from what the page gave.
+fn pasted_name(name: &str) -> String {
+    let base = name.rsplit(['/', '\\']).next().unwrap_or_default();
+    let clean: String = base
+        .chars()
+        .map(|c| if c.is_control() || r#"<>:"|?*"#.contains(c) { '_' } else { c })
+        .take(120)
+        .collect();
+    let clean = clean.trim_matches(|c: char| c == '.' || c.is_whitespace());
+    if clean.is_empty() {
+        "image.png".into()
+    } else {
+        clean.into()
+    }
+}
+
+/// Forget pasted files old enough that nothing reads them any more.
+fn clean_pasted(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir.join(PASTED_DIR)) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let old = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age > PASTED_KEEP);
+        if old {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
+}
+
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1954,6 +2023,28 @@ fn sender_name(app: &AppHandle, t: &TransferView) -> String {
     }
 }
 
+/// Hold Android's Wi-Fi and wake locks from the first transfer that moves
+/// to the end of the last one. Only a transfer that stops looks at the others.
+#[cfg(target_os = "android")]
+fn android_transferring(app: &AppHandle, active: bool) {
+    static HELD: AtomicBool = AtomicBool::new(false);
+    if active {
+        if !HELD.swap(true, Ordering::SeqCst) {
+            android::set_transferring(true);
+        }
+        return;
+    }
+    if !HELD.load(Ordering::SeqCst) {
+        return;
+    }
+    let others = app
+        .try_state::<AppState>()
+        .is_some_and(|s| s.node.transfers().iter().any(|t| t.status.is_active()));
+    if !others && HELD.swap(false, Ordering::SeqCst) {
+        android::set_transferring(false);
+    }
+}
+
 fn on_p2p_event(app: &AppHandle, event: Event) {
     match event {
         Event::FriendStatus { friend_id, online } => {
@@ -1969,6 +2060,8 @@ fn on_p2p_event(app: &AppHandle, event: Event) {
             );
         }
         Event::Transfer(t) => {
+            #[cfg(target_os = "android")]
+            android_transferring(app, t.status.is_active());
             let _ = app.emit("transfer-update", t);
         }
         Event::FriendsChanged => {
@@ -2345,6 +2438,10 @@ fn setup(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     migrate_from_electron(app, &dir);
     // Before any history is read: it is encrypted with this key.
     vault::init(&dir);
+    {
+        let dir = dir.clone();
+        std::thread::spawn(move || clean_pasted(&dir));
+    }
 
     let default_downloads = app
         .path()
@@ -2438,6 +2535,8 @@ fn setup(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
         } else {
             None
         },
+        // Encrypted like the chats: it names the files and where they are.
+        kept: JsonStore::load_sealed(dir.join("transfers.json"), Vec::new()),
     }))?;
     {
         let config = config.lock().unwrap_or_else(|e| e.into_inner());
@@ -2668,6 +2767,7 @@ pub fn run() {
             scan_localsend,
             send_localsend_files,
             send_localsend_paths,
+            save_pasted,
             get_groups,
             create_group,
             respond_to_group_invite,

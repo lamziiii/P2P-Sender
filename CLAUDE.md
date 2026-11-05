@@ -4,7 +4,7 @@ App de chat et d'envoi de fichiers en pair-à-pair : Tauri 2 + Rust (iroh/QUIC) 
 
 ## Règle n°1 : chaque modification doit marcher sur toutes les plateformes
 
-L'app est distribuée sur **Windows, macOS (Apple Silicon), Linux (AppImage) et Android (arm64)**. Toute modification, même petite, doit être vérifiée pour chacune d'elles avant d'être considérée comme terminée :
+L'app est distribuée sur **Windows, macOS (Apple Silicon), Linux (AppImage et .deb) et Android (arm64)**. Toute modification, même petite, doit être vérifiée pour chacune d'elles avant d'être considérée comme terminée :
 
 - **Une fonction ajoutée existe partout**, ou elle est explicitement absente là où elle ne peut pas exister : un message clair à l'utilisateur, l'option cachée dans l'interface. Jamais de fonction qui casse en silence sur une plateforme.
 - **Code Rust propre à un système** : derrière `#[cfg(...)]` (`windows`, `target_os = "macos"`, `target_os = "linux"`, `target_os = "android"`, `desktop`, `mobile`). Vérifier que chaque branche existe et compile, y compris le cas « autres systèmes ».

@@ -15,7 +15,9 @@ const MAX_TEXT = 5000;
 // The chat with a LocalSend device: text sent from its LocalSend app lands
 // here, and what is written here reaches it as a LocalSend text message.
 // Notifications and deletion are in the device's menu, as for a friend.
-export function LocalSendChatView({ fingerprint, notice, dropping, onBack, onToast }: {
+export function LocalSendChatView({ fingerprint, notice, dropping, onBack, onToast, onPasteFiles }: {
+  // Files pasted in the input.
+  onPasteFiles: (files: File[]) => void;
   // Files are dragged over the window: they go to this device.
   dropping?: boolean;
   fingerprint: string;
@@ -166,6 +168,7 @@ export function LocalSendChatView({ fingerprint, notice, dropping, onBack, onToa
         placeholder={device ? 'Écrire un message…' : 'Appareil introuvable : ouvrez LocalSend dessus'}
         maxLength={MAX_TEXT}
         error={error}
+        onPasteFiles={device ? onPasteFiles : undefined}
         before={
           <button
             className="icon-btn attach"

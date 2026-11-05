@@ -187,7 +187,7 @@ const FriendChatRows = memo(function FriendChatRows(props: {
   });
 });
 
-export function FriendChatView({ friend, myId, messages, typing, notices, offers, strip, dropping, onBack, onSent, onReactions, onToast }: {
+export function FriendChatView({ friend, myId, messages, typing, notices, offers, strip, dropping, onBack, onSent, onReactions, onToast, onPasteFiles }: {
   friend: Friend;
   myId: string;
   messages: ChatMessage[];
@@ -205,6 +205,8 @@ export function FriendChatView({ friend, myId, messages, typing, notices, offers
   onSent: (message: ChatMessage) => void;
   onReactions: (id: string, reactions: Record<string, string>) => void;
   onToast: (text: string) => void;
+  // Files pasted in the input.
+  onPasteFiles: (files: File[]) => void;
 }) {
   const [input, setInput] = useState('');
   const [error, setError] = useState('');
@@ -398,6 +400,7 @@ export function FriendChatView({ friend, myId, messages, typing, notices, offers
         maxLength={5000}
         error={error}
         inputRef={inputRef}
+        onPasteFiles={onPasteFiles}
         onKey={e => {
           if (e.key !== 'Escape' || !reply) return false;
           e.stopPropagation();

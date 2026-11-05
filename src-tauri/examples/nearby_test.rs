@@ -26,6 +26,7 @@ async fn start(dir: &Path, name: &str, secret: SecretKey) -> (Node, Identity) {
     let identity = Identity::load_or_create(&dir.join("localsend.json")).expect("identity");
     let downloads = dir.join("downloads");
     let node = Node::start(Options {
+        kept: JsonStore::read_only(Default::default(), Vec::new()),
         secret,
         friends: JsonStore::load(dir.join("friends.json"), Vec::new()),
         invites: JsonStore::load(dir.join("invites.json"), Vec::new()),

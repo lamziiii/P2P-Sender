@@ -313,6 +313,12 @@ export const api = {
       return res;
     }),
   // Files and folders dropped on a friend; errors: why folders were skipped.
+  // A file pasted in a chat, kept on disk to be sent as a dropped one: its path.
+  savePasted: async (file: File, name: string) => invoke<string>(
+    'save_pasted',
+    new Uint8Array(await file.arrayBuffer()),
+    { headers: { 'x-name': encodeURIComponent(name) } },
+  ),
   sendPaths: (friendId: string, paths: string[]) =>
     invoke<{ sent: number; skipped: number; errors: FolderError[] }>('send_paths', { friendId, paths }),
   getTransfers: () => invoke<Transfer[]>('get_transfers'),

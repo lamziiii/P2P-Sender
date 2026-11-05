@@ -44,11 +44,12 @@
 <main>
   <div id="invite" hidden>
     <h1 id="title">Invitation P2P Share</h1>
-    <p id="text">Ouvrez ce lien dans P2P Share pour ajouter votre ami : vous pourrez discuter et vous envoyer des fichiers, directement.</p>
-    <a class="btn" id="open" href="#">Ouvrir dans P2P Share</a>
-    <a class="btn secondary" href="https://github.com/lamziiii/P2P-Sender/releases/latest">Je n’ai pas P2P Share : le télécharger</a>
+    <p id="text">Ouverture de P2P Share… Votre ami y sera ajouté : vous pourrez discuter et vous envoyer des fichiers, directement.</p>
+    <p id="missing" hidden>P2P Share ne s’est pas ouvert ? Installez-le, puis revenez sur ce lien.</p>
+    <a class="btn" id="install" href="https://github.com/lamziiii/P2P-Sender/releases/latest" hidden>Installer P2P Share</a>
+    <a class="btn secondary" id="open" href="#">Ouvrir dans P2P Share</a>
     <div class="note">
-      <p>Rien ne s’ouvre ? Installez P2P Share (version 3.4.6 ou plus), puis revenez sur ce lien. Ou copiez-le et collez-le dans l’app : onglet Amis (bouton + si vous avez déjà des amis), « Vous avez reçu un lien ? ».</p>
+      <p>P2P Share est installé mais ne s’ouvre pas ? Il lui faut la version 3.4.6 ou plus. Ou copiez le lien et collez-le dans l’app : onglet Amis (bouton + si vous avez déjà des amis), « Vous avez reçu un lien ? ».</p>
       <button class="btn secondary" id="copy" type="button">Copier le lien</button>
     </div>
   </div>
@@ -72,10 +73,33 @@
       document.title = 'Invitation de ' + name + ' · P2P Share';
     }
     document.getElementById('invite').hidden = false;
-    // Only from the button: opened by itself, without the app, Firefox and
-    // Safari replace this page with an error, and Chrome on Android ignores
-    // it anyway.
-    document.getElementById('open').href = 'p2pshare://ami?' + payload;
+    var app = 'p2pshare://ami?' + payload;
+    document.getElementById('open').href = app;
+
+    // Open the app at once. Firefox and Safari replace the page with an
+    // error when nothing handles the link: they get it in a hidden frame.
+    var ua = navigator.userAgent;
+    var framed = /Firefox\//.test(ua) || (/Safari\//.test(ua) && !/Chrome|Chromium|Edg|OPR|Android/.test(ua));
+    var left = false;
+    var leave = function () { left = true; };
+    window.addEventListener('blur', leave);
+    window.addEventListener('pagehide', leave);
+    document.addEventListener('visibilitychange', function () { if (document.hidden) leave(); });
+    if (framed) {
+      var frame = document.createElement('iframe');
+      frame.style.display = 'none';
+      frame.src = app;
+      document.body.appendChild(frame);
+    } else {
+      location.href = app;
+    }
+    // Still here and in front: no app took the link, offer to install it.
+    setTimeout(function () {
+      if (left && !document.hasFocus()) return;
+      document.getElementById('text').hidden = true;
+      document.getElementById('missing').hidden = false;
+      document.getElementById('install').hidden = false;
+    }, 2500);
     var copy = document.getElementById('copy');
     copy.addEventListener('click', function () {
       var done = function () { copy.textContent = 'Lien copié'; };

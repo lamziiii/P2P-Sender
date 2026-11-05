@@ -1,10 +1,10 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { api } from './api';
 import type { Friend, InviteLink } from './api';
 import { Icon } from './icons';
 
 // Invitation links (see src-tauri/src/invite.rs): one friend sends a link,
-// the other opens it and accepts; both are then friends.
+// the other opens it; both are then friends.
 
 const ACCEPT_ERRORS: Record<string, string> = {
   invalid_link: 'Ce lien d’invitation n’est pas valide.',
@@ -101,31 +101,30 @@ export function InviteFriend({ onOpenLink, onClose }: {
   );
 }
 
-// Asked when a link opens the app (or is pasted): add whoever made it?
+// A link opened (or pasted) is accepted at once: opening it is the yes.
+// Shown only while adding, when it fails, or when there is nothing to add.
 export function InviteDialog({ invite, onDone }: {
   invite: InviteLink;
   // With the friends once added.
-  onDone: (added?: { friends: Friend[]; id: string }) => void;
+  onDone: (added?: { friends: Friend[]; id: string; name: string }) => void;
 }) {
   const [error, setError] = useState('');
-  const [busy, setBusy] = useState(false);
   const who = invite.name || 'cette personne';
+  const adding = !invite.own && !invite.known;
+  // Once: the effect runs twice in development.
+  const started = useRef(false);
 
-  const accept = async () => {
-    setBusy(true);
-    try {
-      const res = await api.acceptInvite(invite.link);
-      if ('error' in res) {
-        setError(ACCEPT_ERRORS[res.error] ?? 'Impossible d’ajouter cet ami.');
-        return;
-      }
-      onDone(res);
-    } catch {
-      setError('Impossible d’ajouter cet ami.');
-    } finally {
-      setBusy(false);
-    }
-  };
+  useEffect(() => {
+    if (!adding || started.current) return;
+    started.current = true;
+    api.acceptInvite(invite.link).then(
+      res => {
+        if ('error' in res) setError(ACCEPT_ERRORS[res.error] ?? 'Impossible d’ajouter cet ami.');
+        else onDone({ ...res, name: invite.name });
+      },
+      () => setError('Impossible d’ajouter cet ami.'),
+    );
+  }, [adding, invite.link, invite.name, onDone]);
 
   let title;
   let text;
@@ -135,11 +134,13 @@ export function InviteDialog({ invite, onDone }: {
   } else if (invite.known) {
     title = `${who} est déjà dans vos amis`;
     text = 'Vous êtes déjà connectés : rien à faire.';
+  } else if (error) {
+    title = `${who} n’a pas pu être ajouté`;
+    text = 'Demandez-lui un nouveau lien d’invitation.';
   } else {
-    title = `Ajouter ${who} ?`;
-    text = `Vous avez ouvert le lien d’invitation de ${who}. Une fois ajouté, vous pourrez discuter et vous envoyer des fichiers. N’acceptez que les liens reçus de quelqu’un que vous connaissez.`;
+    title = `Ajout de ${who}…`;
+    text = 'Vous avez ouvert son lien d’invitation.';
   }
-  const question = !invite.own && !invite.known;
 
   return (
     <div className="modal-backdrop" onClick={() => onDone()}>
@@ -147,13 +148,9 @@ export function InviteDialog({ invite, onDone }: {
         <div className="modal-title">{title}</div>
         <div className="modal-text">{text}</div>
         {error && <div className="error-text">{error}</div>}
-        <div style={{ display: 'flex', gap: 8 }}>
-          {/* Enter cancels: a link from a stranger is not added by mistake. */}
-          {question && <button className="btn btn-secondary" style={{ flex: 1 }} autoFocus onClick={() => onDone()}>Annuler</button>}
-          {question
-            ? <button className="btn" style={{ flex: 1 }} disabled={busy} onClick={accept}>Ajouter</button>
-            : <button className="btn" style={{ flex: 1 }} autoFocus onClick={() => onDone()}>OK</button>}
-        </div>
+        {(!adding || error) && (
+          <button className="btn" autoFocus onClick={() => onDone()}>OK</button>
+        )}
       </div>
     </div>
   );

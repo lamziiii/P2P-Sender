@@ -38,6 +38,7 @@ impl Peer {
         std::fs::create_dir_all(&self.dir).unwrap();
         let downloads = self.dir.join("downloads");
         Node::start(Options {
+            kept: JsonStore::read_only(Default::default(), Vec::new()),
             secret: self.secret.clone(),
             friends: JsonStore::load(self.dir.join("friends.json"), Vec::new()),
             invites: JsonStore::load(self.dir.join("invites.json"), Vec::new()),

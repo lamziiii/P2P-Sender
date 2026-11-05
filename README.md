@@ -16,18 +16,18 @@ Or download the installer for your system from the [latest release](https://gith
 
 - **Windows**: `P2PShare_*_x64-setup.exe`
 - **macOS** (Apple Silicon): `P2PShare_*_aarch64.dmg`
-- **Linux**: `P2PShare_*_amd64.AppImage`
+- **Linux**: `P2PShare_*_amd64.AppImage`, or `P2PShare_*_amd64.deb` for Debian and Ubuntu (`sudo apt install ./P2PShare_*_amd64.deb`)
 
 The installers are not signed yet: Windows SmartScreen may ask you to confirm, and Smart App Control may block them.
 
 **macOS**: the app is not notarized by Apple, so macOS refuses to open it the first time. Right-click the app in Applications → Open, or run `xattr -cr /Applications/P2PShare.app`. It lives in the menu bar (no Dock icon). On macOS 15 and later, allow it on the local network when asked: LocalSend and the fast local-network path need it.
 
-**Linux**: the AppImage needs FUSE 2 (`sudo apt install libfuse2` on Ubuntu 22.04 and later), then `chmod +x P2PShare_*.AppImage`. GNOME shows tray icons only with the AppIndicator extension; without it, launch the app again to bring its window back. On Wayland the window opens where the compositor puts it. Each release lists the SHA-256 of its files in `SHA256SUMS.txt`.
+**Linux**: the `.deb` installs the app in the applications menu, with its dependencies. The AppImage needs FUSE 2 (`sudo apt install libfuse2` on Ubuntu 22.04 and later), then `chmod +x P2PShare_*.AppImage`. GNOME shows tray icons only with the AppIndicator extension; without it, launch the app again to bring its window back. On Wayland the window opens where the compositor puts it. Each release lists the SHA-256 of its files in `SHA256SUMS.txt`.
 
 ## Features
 
 - **Private chat**: end-to-end encrypted messages with delivery receipts; messages written while a friend is offline are delivered when they reconnect.
-- **File transfer**: files of any size, several at once, each one accepted by the receiver first, with automatic resume after a network drop.
+- **File transfer**: files of any size, several at once, each one accepted by the receiver first, with automatic resume after a network drop or a restart.
 - **Fast on the local network** (3.3): when a friend is on the same network, the bytes go over a direct connection instead of the internet path.
 - **Groups**: group chats of up to 32 members and a shared file repository per group; members do not need to be friends with each other.
 - **LocalSend**: send and receive files with the LocalSend app, and chat with LocalSend devices (3.3).
@@ -36,6 +36,20 @@ The installers are not signed yet: Windows SmartScreen may ask you to confirm, a
 - **Tray app**: Windows 11 (Fluent) look, dark and light themes, clickable notifications, optional start with the computer (hidden in the tray).
 
 The full list of changes, for users and in French, is in [CHANGELOG.md](CHANGELOG.md); the app shows it after each update and in Settings → À propos.
+
+## What's new in 3.4.8.5
+
+- **Transfers go on after a restart**: unfinished transfers with friends are kept in `transfers.json` (encrypted like the chats, `src-tauri/src/p2p/resume.rs`) and come back paused; the sender offers them again and the receiver answers with what its `.part` file holds. A source file changed meanwhile is not resumed. Shared files of groups and LocalSend transfers are not kept.
+- **Invitation links add at once**: opening one (or pasting it) adds whoever made it, with no question; the page opens the app by itself and offers to install it when nothing opens.
+- **Paste to send**: a screenshot or files copied in the file explorer, pasted in a chat (friend, group, LocalSend), are sent as if dropped there; they are kept for 30 days in `pasted/` of the app data folder, for transfers that wait or resume.
+- **Local network**:
+  - When the sender cannot connect to the receiver (its firewall), it asks the receiver to connect to it instead (`lan_dial`, to peers that advertise `rev`).
+  - A file that started over iroh moves to the fast path, from where it is, once the friend turns out to be on the same network.
+  - On Android, the Wi-Fi stays at full speed and the processor awake while files move (Wi-Fi and wake locks).
+  - The Windows installer adds a firewall rule for the app, on every network profile (`src-tauri/windows/hooks.nsh`), after one administrator prompt, on a first install only; the rule stays after an uninstall.
+- **Desktop shortcut kept as it was**: installed over an earlier version (by hand or by winget), the installer no longer puts back a desktop shortcut that had been deleted (`hooks.nsh`: the uninstaller notes it before a reinstall removes it, a silent install looks for itself). The app's own updates never touched shortcuts (they pass `/UPDATE`).
+- **Debian package**: a `.deb` for Debian and Ubuntu, next to the AppImage, which updates itself as well.
+- **Code signing for macOS** is ready in the workflow, once the Apple secrets are set (see "Code signing").
 
 ## What's new in 3.4.7
 
@@ -99,7 +113,7 @@ LocalSend compatibility is on unless the local network is turned off in the sett
 - The computer shows up in LocalSend under your nickname. Each incoming file is offered for you to accept, like files from friends.
 - The devices found appear in the Friends tab, to send them files or open their chat. When we send, the device's certificate must match the fingerprint it announced.
 - It speaks LocalSend protocol v2.2 over HTTPS with a self-signed certificate (`localsend.json` in the app data folder), on port 53317 (TCP and UDP multicast), or another TCP port if that one is taken, for example by the LocalSend app itself.
-- Allow the app through the firewall, on public networks too (campus Wi-Fi is often one). Networks that isolate their clients (guest Wi-Fi, some campus networks) keep devices from seeing each other.
+- Allow the app through the firewall, on public networks too (campus Wi-Fi is often one); the Windows installer adds that rule since 3.4.8.5. Networks that isolate their clients (guest Wi-Fi, some campus networks) keep devices from seeing each other.
 
 ## Groups (since 3.1)
 
@@ -162,7 +176,7 @@ GitHub Actions builds an arm64 APK on every push, downloadable from the Actions 
 
 ### Updates
 
-On Windows, macOS and Linux (AppImage) the app looks for a newer release a minute after starting and then every 6 hours, and offers it over the friend list and in Settings (which also has a check button); installing saves everything and restarts the app. With "Installer les mises à jour automatiquement" on, it installs by itself once no transfer runs. It reads `latest.json` from the latest release, and only installs files signed with the updater key. Android has no automatic updates: Settings links to the releases page. A stable release needs the secrets `TAURI_SIGNING_PRIVATE_KEY` (the private key from `npx tauri signer generate`) and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`; its public key is in `src-tauri/tauri.conf.json`. Keep the private key safe: without it, installed apps cannot be updated any more.
+On Windows, macOS and Linux (AppImage and `.deb`) the app looks for a newer release a minute after starting and then every 6 hours, and offers it over the friend list and in Settings (which also has a check button); installing saves everything and restarts the app. With "Installer les mises à jour automatiquement" on, it installs by itself once no transfer runs. It reads `latest.json` from the latest release, and only installs files signed with the updater key; an app installed from the `.deb` takes the `.deb` (`linux-x86_64-deb`), which asks for the administrator password to install. Android has no automatic updates: Settings links to the releases page. A stable release needs the secrets `TAURI_SIGNING_PRIVATE_KEY` (the private key from `npx tauri signer generate`) and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`; its public key is in `src-tauri/tauri.conf.json`. Keep the private key safe: without it, installed apps cannot be updated any more.
 
 ### Code signing
 
@@ -171,6 +185,12 @@ Windows release builds are signed through [SignPath](https://signpath.io) once t
 - the secret `SIGNPATH_API_TOKEN` (a SignPath API token of a CI user allowed to submit signing requests);
 - the repository variables `SIGNPATH_ORGANIZATION_ID`, `SIGNPATH_PROJECT_SLUG` and `SIGNPATH_SIGNING_POLICY_SLUG`;
 - on SignPath, a trusted build system for GitHub.com linked to the project, and an artifact configuration that signs the `.exe` at the root of the artifact.
+
+macOS release builds are signed with an Apple Developer ID and notarized once the repository has these secrets (an Apple Developer Program membership is needed); without them, the app keeps its ad hoc signature and macOS warns on first opening:
+
+- `APPLE_CERTIFICATE` (the Developer ID Application certificate exported as `.p12`, in base64) and `APPLE_CERTIFICATE_PASSWORD`;
+- `APPLE_SIGNING_IDENTITY` (its name, such as `Developer ID Application: Name (TEAMID)`);
+- for notarization, `APPLE_ID`, `APPLE_PASSWORD` (an app-specific password) and `APPLE_TEAM_ID`.
 
 Only version tags are signed, not every push or pull request.
 

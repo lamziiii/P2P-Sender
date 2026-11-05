@@ -116,6 +116,12 @@ pub fn notify(title: &str, body: &str, chat: Option<(&str, &str)>) {
     );
 }
 
+/// Files are moving (or no longer): Wi-Fi at full speed and the processor
+/// awake meanwhile.
+pub fn set_transferring(on: bool) {
+    call_unit("setTransferring", json!({ "enabled": on }));
+}
+
 pub fn hold_multicast() {
     call_unit("holdMulticast", json!({}));
 }

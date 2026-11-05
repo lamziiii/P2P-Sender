@@ -26,10 +26,12 @@ mod external;
 mod groups;
 mod invites;
 mod lan;
+mod resume;
 mod tunnel;
 
 pub use external::{ExternalFile, OutgoingFile};
 pub use invites::{clean_nickname, is_code as is_invite_code, Invite};
+pub use resume::Kept as KeptTransfer;
 
 pub use groups::{GroupDetail, GroupFileView, GroupMessageView, GroupsOverview};
 
@@ -647,6 +649,8 @@ pub struct Options {
     pub relay: Option<CustomRelay>,
     /// Our certificate for the local-network fast path, which is off without.
     pub lan: Option<crate::localsend::Identity>,
+    /// Unfinished transfers of the previous run (see `resume.rs`).
+    pub kept: JsonStore<Vec<KeptTransfer>>,
 }
 
 // ─── Internal state ──────────────────────────────────────────────────────────
@@ -998,6 +1002,15 @@ struct State {
     /// connection to one last failed.
     lan_peers: HashMap<String, lan::LanPeer>,
     lan_down: HashMap<String, Instant>,
+    /// Our streams waiting for the receiver to connect to us (see
+    /// `Node::lan_reverse`), by transfer.
+    lan_wait: HashMap<String, oneshot::Sender<lan::Stream>>,
+    /// Peers we reach only by asking them to connect, until when.
+    lan_pull: HashMap<String, Instant>,
+    /// Unfinished transfers, written for the next start (see `resume.rs`),
+    /// and whether they changed since.
+    kept: JsonStore<Vec<KeptTransfer>>,
+    kept_changed: bool,
     /// What we tell peers of ours, once we have an address.
     lan_advert: Option<Value>,
     /// Read receipts and "typing", both ways (see `Node::set_read_receipts`).
@@ -1046,7 +1059,8 @@ impl State {
         if self.save_at.is_none()
             && (self.friends.changed
                 || self.gmeta.changed
-                || self.groups.values().any(|g| !g.unsaved.is_empty()))
+                || self.groups.values().any(|g| !g.unsaved.is_empty())
+                || self.kept_changed)
         {
             self.save_at = Some(now + SAVE_DELAY);
             self.wake_timers = true;
@@ -1138,6 +1152,7 @@ impl State {
             sample_time: Instant::now(),
         };
         self.transfers.insert(id.clone(), t);
+        self.kept_changed = true;
         if self.transfers.len() > MAX_FINISHED {
             // The timer task forgets the oldest finished ones.
             self.wake_timers = true;
@@ -1254,6 +1269,7 @@ impl State {
         }
         let was_active = t.status.is_active();
         t.status = status;
+        self.kept_changed = true;
         if status.is_final() {
             // Dropping it tells an external sender the file is not coming.
             t.decision = None;
@@ -1775,10 +1791,10 @@ fn is_part_file(name: &str) -> bool {
         && rest[rest.len() - 8..].bytes().all(|b| b.is_ascii_hexdigit())
 }
 
-/// Remove `.part` files left by a previous run (transfers do not survive a
-/// restart) in the download folder and the shared-files folders, with
-/// their folders (links are not followed).
-fn remove_stale_parts(download_dir: &Path) {
+/// Remove `.part` files left by a previous run in the download folder and
+/// the shared-files folders, with their folders (links are not followed),
+/// but those of the transfers that go on (`keep`).
+fn remove_stale_parts(download_dir: &Path, keep: &HashSet<PathBuf>) {
     // (folder, how deep its folders are looked through)
     let mut dirs = vec![
         (download_dir.to_path_buf(), 0),
@@ -1794,7 +1810,10 @@ fn remove_stale_parts(download_dir: &Path) {
             };
             if kind.is_dir() && depth > 0 {
                 dirs.push((entry.path(), depth - 1));
-            } else if kind.is_file() && entry.file_name().to_str().is_some_and(is_part_file) {
+            } else if kind.is_file()
+                && entry.file_name().to_str().is_some_and(is_part_file)
+                && !keep.contains(&entry.path())
+            {
                 let _ = std::fs::remove_file(entry.path());
             }
         }
@@ -1965,6 +1984,10 @@ impl Node {
             rate: HashMap::new(),
             lan_peers: HashMap::new(),
             lan_down: HashMap::new(),
+            lan_wait: HashMap::new(),
+            lan_pull: HashMap::new(),
+            kept: opts.kept,
+            kept_changed: false,
             lan_advert: None,
             read_receipts: true,
             read_unsent: HashMap::new(),
@@ -1998,9 +2021,11 @@ impl Node {
             node.start_lan(listener);
         }
 
+        // Before the stale `.part` files go: those of kept transfers stay.
+        let keep = node.restore_transfers().await;
         let download_dir = (node.0.download_dir)();
         node.spawn(async move {
-            let _ = tokio::task::spawn_blocking(move || remove_stale_parts(&download_dir)).await;
+            let _ = tokio::task::spawn_blocking(move || remove_stale_parts(&download_dir, &keep)).await;
         });
         node.spawn(node.clone().accept_loop());
         node.spawn(node.clone().timers());
@@ -2020,11 +2045,12 @@ impl Node {
     pub async fn shutdown(&self) {
         self.save_now();
         // A folder's unfinished files are in it, where the next start does
-        // not look for them (see `remove_stale_parts`).
+        // not look for them (see `remove_stale_parts`), unless kept to go on.
         let parts: Vec<PathBuf> = self.with(|s| {
             s.transfers
                 .values()
                 .filter(|t| t.dir == Dir::In && t.folder.is_some() && !t.status.is_final())
+                .filter(|t| t.kept().is_none())
                 .filter_map(|t| t.part_path.clone())
                 .collect()
         });
@@ -2039,6 +2065,10 @@ impl Node {
             let _ = s.friends.save_now();
             s.chats.save_now();
             let _ = s.gmeta.save_now();
+            s.kept_changed = true;
+            if let Some((path, json)) = s.take_kept() {
+                let _ = write_atomic(&path, &json);
+            }
             for (path, lines) in s.take_group_writes() {
                 let _ = groups::append_lines(&path, &lines);
             }
@@ -2271,13 +2301,14 @@ impl Node {
                     s.chats.unload_idle(now);
                 }
 
-                let mut stores = [None, None];
+                let mut stores = [None, None, None];
                 let mut logs = Vec::new();
                 let mut chats = Vec::new();
                 if s.save_at.is_some_and(|at| at <= now) {
                     s.save_at = None;
                     stores[0] = s.friends.take_dirty();
                     stores[1] = s.gmeta.take_dirty();
+                    stores[2] = s.take_kept();
                     logs = s.take_group_writes();
                 }
                 if s.messages_save_at.is_some_and(|at| at <= now) {
@@ -2292,7 +2323,7 @@ impl Node {
                 (stores, chats, logs, next)
             });
 
-            let mut failed = [false; 2];
+            let mut failed = [false; 3];
             for (i, (path, json)) in stores
                 .into_iter()
                 .enumerate()
@@ -2320,6 +2351,9 @@ impl Node {
                     }
                     if failed[1] {
                         s.gmeta.mark_dirty();
+                    }
+                    if failed[2] {
+                        s.kept_changed = true;
                     }
                 });
             }
@@ -2917,6 +2951,10 @@ impl Node {
                             friend_id: fid.clone(),
                             route,
                         });
+                        // Now next to us: files under way move to the fast path.
+                        if route == Some("lan") {
+                            node.lan_upgrade(s, &fid);
+                        }
                     }
                 });
             }
@@ -3116,6 +3154,7 @@ impl Node {
             Some("blob_req") => self.on_blob_req(s, friend_id, conn_id, msg),
             Some("blob_missing") => self.on_blob_missing(s, friend_id, msg),
             Some("lan") => self.on_lan(s, friend_id, msg),
+            Some("lan_dial") => self.on_lan_dial(s, friend_id, tid),
             _ => {}
         }
     }
@@ -3779,7 +3818,19 @@ impl Node {
         let (tid, session) = (job.tid.clone(), job.session);
         let mut sink = None;
         if let Some(target) = job.lan.take() {
-            sink = self.lan_connect(target).await.map(|t| lan::Sink::Lan(Box::new(t)));
+            let reverse = target.reverse();
+            // Known to work only the other way: straight to it.
+            let pull = reverse && self.with(|s| s.lan_pull_only(&job.peer));
+            let mut stream = if pull { None } else { self.lan_connect(target).await };
+            // We cannot reach the receiver (its firewall, most likely): it
+            // may reach us.
+            if stream.is_none() && reverse {
+                stream = self.lan_reverse(&tid, &job.peer, session).await;
+                if stream.is_some() && !pull {
+                    self.with(|s| s.lan_pulled(&job.peer));
+                }
+            }
+            sink = stream.map(|t| lan::Sink::Lan(Box::new(t)));
             if sink.is_none() {
                 self.with(|s| self.lan_failed(s, &job.peer));
             }

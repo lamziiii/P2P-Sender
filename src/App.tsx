@@ -13,7 +13,7 @@ import { Icon } from './icons';
 import { InviteDialog } from './Invite';
 import { WindowButtons } from './PinButton';
 import { LocalSendChatView } from './LocalSendChat';
-import { isMobile, useBackButton } from './platform';
+import { byPlatform, isMobile, useBackButton } from './platform';
 import { useConnection } from './relay';
 import { newsToShow, RELEASES } from './releaseNotes';
 import { SettingsTab } from './SettingsTab';
@@ -31,6 +31,8 @@ const PREVIEW_CHARS = 120;
 const TYPING_SHOWN = 5000;
 // Transfer updates shown together within that many ms.
 const UPDATE_BATCH = 100;
+// Largest file sent by pasting it: it goes through memory.
+const MAX_PASTE = 500 * 1024 * 1024;
 
 // Running transfers, seen from every tab but their own. Renders on its own
 // when their progress changes.
@@ -295,6 +297,26 @@ function App() {
       } catch (e) {
         showToast(String(e));
       }
+    }
+  };
+
+  // Files pasted in a chat: saved, then sent as if dropped there.
+  const pasteFiles = async (target: DropTarget, files: File[]) => {
+    if (files.some(f => f.size > MAX_PASTE)) {
+      showToast(`Fichier trop gros pour être collé : ${byPlatform('glissez-le dans la discussion', 'envoyez-le avec le trombone')}.`);
+      return;
+    }
+    try {
+      const stamp = new Date().toLocaleString('fr-FR').replace(/\//g, '-').replace(/:/g, '.');
+      const paths = await Promise.all(files.map(f => {
+        // A screenshot comes as "image.png": named after when it was pasted.
+        const generic = !f.name || /^image\.\w+$/i.test(f.name);
+        const ext = f.name.split('.').pop() || 'png';
+        return api.savePasted(f, generic ? `Image collée ${stamp}.${ext}` : f.name);
+      }));
+      await dropPaths(target, paths);
+    } catch {
+      showToast('Impossible d’envoyer ce que vous avez collé.');
     }
   };
 
@@ -628,6 +650,7 @@ function App() {
             if (added) {
               setFriends(added.friends);
               setActiveTab('friends');
+              showToast(`${added.name || 'Votre ami'} est maintenant dans vos amis.`);
             }
           }}
         />
@@ -656,6 +679,7 @@ function App() {
         friends={friends}
         notice={notices}
         dropping={dragging}
+        onPasteFiles={files => pasteFiles({ kind: 'group', id: groupId, name: overview.groups.find(g => g.id === groupId)?.name ?? '' }, files)}
         onChange={loadGroups}
         onBack={() => { setActiveTab('groups'); loadGroups(); }}
       />
@@ -672,6 +696,7 @@ function App() {
         dropping={dragging}
         onBack={() => setActiveTab('friends')}
         onToast={showToast}
+        onPasteFiles={files => pasteFiles({ kind: 'localsend', id: lsChat, name: '' }, files)}
       />
     );
   }
@@ -707,6 +732,7 @@ function App() {
         onSent={entry => onSent(friendId, entry)}
         onReactions={setReactions}
         onToast={showToast}
+        onPasteFiles={files => pasteFiles({ kind: 'friend', id: friendId, name: chatFriend.name }, files)}
       />
     );
   }

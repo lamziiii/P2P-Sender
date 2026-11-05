@@ -3906,7 +3906,7 @@ dependencies = [
 
 [[package]]
 name = "p2pshare"
-version = "3.4.8"
+version = "3.4.8+5"
 dependencies = [
  "base64 0.22.1",
  "blake3",

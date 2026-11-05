@@ -27,6 +27,7 @@ async fn main() {
     std::fs::create_dir_all(&work).unwrap();
     let downloads = work.join("downloads");
     let node = Node::start(Options {
+        kept: JsonStore::read_only(Default::default(), Vec::new()),
         secret: SecretKey::generate(),
         friends: JsonStore::load(work.join("friends.json"), Vec::new()),
         invites: JsonStore::load(work.join("invites.json"), Vec::new()),

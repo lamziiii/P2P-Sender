@@ -283,8 +283,10 @@ const suggestions = (members: GroupMember[], query: string): Suggestion[] => {
 
 type Pane = 'chat' | 'files' | 'settings';
 
-export function GroupView({ gid, friends, notice, dropping, onChange, onBack }: {
+export function GroupView({ gid, friends, notice, dropping, onPasteFiles, onChange, onBack }: {
   gid: string;
+  // Files pasted in the input: to the shared files.
+  onPasteFiles: (files: File[]) => void;
   friends: Friend[];
   // Shown above the group (incoming file offers, unread messages).
   notice?: React.ReactNode[];
@@ -533,6 +535,7 @@ export function GroupView({ gid, friends, notice, dropping, onChange, onBack }: 
             maxLength={5000}
             error={error}
             inputRef={inputRef}
+            onPasteFiles={inactive ? undefined : onPasteFiles}
             onKey={e => {
               if (!mention || shown.length === 0) return false;
               if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {

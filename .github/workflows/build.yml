@@ -139,6 +139,31 @@ jobs:
             echo "enabled=true" >> "$GITHUB_OUTPUT"
           fi
 
+      # macOS release builds are signed with a Developer ID and notarized once
+      # its secrets are set (see "Code signing" in the README); ad hoc
+      # otherwise, as before. Tauri reads them from the environment, where
+      # an empty one would be taken as given: only those set go there.
+      - name: Use the Apple signing identity
+        if: runner.os == 'macOS' && startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if [ -z "$APPLE_CERTIFICATE" ] || [ -z "$APPLE_SIGNING_IDENTITY" ]; then
+            echo "No Apple signing identity: ad hoc signature."
+            exit 0
+          fi
+          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+            if [ -n "${!name}" ]; then
+              { echo "$name<<__APPLE_END__"; echo "${!name}"; echo "__APPLE_END__"; } >> "$GITHUB_ENV"
+            fi
+          done
+
       - name: Build installers
         if: steps.sign.outputs.enabled != 'true'
         # Arguments after -- go to cargo build.
@@ -223,7 +248,8 @@ jobs:
           ls -l "$b/macos/$name.app.tar.gz"
 
       # What the app's updater downloads, each with its .sig: the installer
-      # (after SignPath, when signed), the AppImage, the app in a .tar.gz.
+      # (after SignPath, when signed), the AppImage and the .deb, the app in
+      # a .tar.gz.
       - name: Sign the update
         if: env.UPDATER_KEY != ''
         shell: bash
@@ -235,7 +261,7 @@ jobs:
           b=src-tauri/target/release/bundle
           case "$RUNNER_OS" in
             Windows) files=$(ls $b/nsis/*-setup.exe) ;;
-            Linux) files=$(ls $b/appimage/*.AppImage) ;;
+            Linux) files=$(ls $b/appimage/*.AppImage $b/deb/*.deb) ;;
             macOS) files=$(ls $b/macos/*.app.tar.gz) ;;
           esac
           # Bound to the version: the app refuses a signature of another one
@@ -255,6 +281,8 @@ jobs:
             src-tauri/target/release/bundle/macos/*.sig
             src-tauri/target/release/bundle/appimage/*.AppImage
             src-tauri/target/release/bundle/appimage/*.sig
+            src-tauri/target/release/bundle/deb/*.deb
+            src-tauri/target/release/bundle/deb/*.sig
           if-no-files-found: error
 
   android:
@@ -396,7 +424,7 @@ jobs:
 
           - **Windows** : `P2PShare_*_x64-setup.exe`
           - **macOS** (Apple Silicon) : `P2PShare_*_aarch64.dmg`
-          - **Linux** : `P2PShare_*_amd64.AppImage`
+          - **Linux** : `P2PShare_*_amd64.AppImage`, ou `P2PShare_*_amd64.deb` pour Debian et Ubuntu
           - **Android** (arm64) : `P2PShare_*_android-arm64.apk`, si présent
 
           Depuis la version 3.4.5, l'app se met à jour toute seule sur Windows, macOS et Linux (Paramètres → À propos). Depuis une version plus ancienne, installez celle-ci une fois à la main.
@@ -410,7 +438,7 @@ jobs:
       - name: Compute checksums
         run: |
           cd artifacts
-          find . -type f \( -name '*.exe' -o -name '*.dmg' -o -name '*.AppImage' -o -name '*.app.tar.gz' -o -name '*.apk' \) -print0 |
+          find . -type f \( -name '*.exe' -o -name '*.dmg' -o -name '*.AppImage' -o -name '*.deb' -o -name '*.app.tar.gz' -o -name '*.apk' \) -print0 |
             while IFS= read -r -d '' f; do
               echo "$(sha256sum "$f" | cut -d' ' -f1)  $(basename "$f")"
             done > SHA256SUMS.txt
@@ -442,7 +470,9 @@ jobs:
           platforms = {}
           for target, pattern in [('windows-x86_64', '*-setup.exe'),
                                   ('darwin-aarch64', '*.app.tar.gz'),
-                                  ('linux-x86_64', '*.AppImage')]:
+                                  ('linux-x86_64', '*.AppImage'),
+                                  # Looked for first by an app installed from the .deb.
+                                  ('linux-x86_64-deb', '*.deb')]:
               found = glob.glob(f'artifacts/**/{pattern}', recursive=True)
               if len(found) != 1 or not os.path.exists(found[0] + '.sig'):
                   print(f'::error::No signed update for {target}: the TAURI_SIGNING_PRIVATE_KEY secret is not set?')
@@ -471,6 +501,7 @@ jobs:
             echo 'artifacts/**/*.exe'
             echo 'artifacts/**/*.dmg'
             echo 'artifacts/**/*.AppImage'
+            echo 'artifacts/**/*.deb'
             if [ -n "$(find artifacts -name '*.apk')" ]; then echo 'artifacts/**/*.apk'; fi
             # latest.json comes after the release is complete (below).
             if [ -f artifacts/latest.json ]; then
@@ -485,7 +516,7 @@ jobs:
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
         with:
           name: P2PShare ${{ github.ref_name }}
-          # Each installer sits in its bundle folder (nsis/, dmg/, appimage/).
+          # Each installer sits in its bundle folder (nsis/, dmg/, appimage/, deb/).
           files: ${{ steps.files.outputs.list }}
           fail_on_unmatched_files: true
           prerelease: ${{ contains(github.ref_name, '-') }}

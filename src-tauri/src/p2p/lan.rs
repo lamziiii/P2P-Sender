@@ -18,9 +18,16 @@
 //! direct path is over IPv6, and only a few of them.
 //!
 //! The receiver only takes a stream whose client certificate is the one the
-//! transfer's peer advertised. When the connection fails, the sender goes
-//! back to QUIC for that peer for a while; the receiver asks to resume from
-//! what it has, as for any interrupted stream.
+//! transfer's peer advertised. When the sender cannot connect (the
+//! receiver's firewall), it asks the receiver to connect to it instead
+//! (`lan_dial`, to peers that advertise `rev`): the receiver opens with
+//! [tid:16][REVERSE_HELLO], then reads the stream as if it had come in.
+//! When neither works, the sender goes back to QUIC for that peer for a
+//! while; the receiver asks to resume from what it has, as for any
+//! interrupted stream.
+//!
+//! A file that started over QUIC moves to this path once the peer turns
+//! out to be next to us (`Node::lan_upgrade`), from where it is.
 
 use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -73,6 +80,15 @@ const MAX_HANDSHAKES: usize = 32;
 /// (Above `MAX_AUTO_ACTIVE`: a folder's files may all start at once.)
 const MAX_HANDSHAKES_PER_IP: usize = 16;
 const READ_CHUNK: usize = 256 * 1024;
+/// The offset that opens a stream the receiver connected for (see above).
+const REVERSE_HELLO: u64 = u64::MAX;
+/// How long the sender waits for the receiver to connect to it.
+const REVERSE_WAIT: Duration = Duration::from_secs(4);
+/// A peer we could only reach by asking it to connect is asked at once,
+/// without trying first, for that long.
+const PULL_FOR: Duration = Duration::from_secs(10 * 60);
+/// What must be left of a file under way for it to move to the fast path.
+const UPGRADE_MIN: u64 = 16 << 20;
 
 pub(super) type Stream = TlsStream<TcpStream>;
 
@@ -90,6 +106,8 @@ pub(super) struct LanPeer {
     ips: Vec<Ipv4Addr>,
     /// The connection it came over: a peer advertises again on each one.
     conn: Option<u64>,
+    /// It connects to us when asked (3.4.8.5 and later).
+    rev: bool,
 }
 
 impl LanPeer {
@@ -103,6 +121,13 @@ pub(super) struct LanTarget {
     peer: LanPeer,
     /// Remote addresses of the direct paths iroh has to the peer.
     direct: Vec<IpAddr>,
+}
+
+impl LanTarget {
+    /// The peer can connect to us instead.
+    pub(super) fn reverse(&self) -> bool {
+        self.peer.rev
+    }
 }
 
 impl Lan {
@@ -404,6 +429,19 @@ impl State {
         })
     }
 
+    /// `peer` lets us in only when it connects (see `Node::lan_reverse`).
+    pub(super) fn lan_pull_only(&self, peer: &str) -> bool {
+        self.lan_pull
+            .get(peer)
+            .is_some_and(|until| Instant::now() < *until)
+    }
+
+    /// We could not connect to `peer`, but it could connect to us.
+    pub(super) fn lan_pulled(&mut self, peer: &str) {
+        self.lan_pull
+            .insert(peer.to_string(), Instant::now() + PULL_FOR);
+    }
+
     pub(super) fn send_lan_advert(&self, peer: &str) {
         if let Some(advert) = &self.lan_advert {
             self.send(peer, advert.clone());
@@ -436,7 +474,7 @@ impl Node {
                 .await
                 .unwrap_or_default();
             let advert = (!ips.is_empty())
-                .then(|| json!({ "type": "lan", "fp": fingerprint, "port": port, "ips": ips }));
+                .then(|| json!({ "type": "lan", "fp": fingerprint, "port": port, "ips": ips, "rev": true }));
             self.with(|s| {
                 if s.lan_advert == advert {
                     return;
@@ -492,6 +530,7 @@ impl Node {
                     port,
                     ips,
                     conn: s.conns.get(peer).map(|c| c.id),
+                    rev: msg.get("rev").and_then(Value::as_bool).unwrap_or(false),
                 };
                 // Somewhere else now: worth trying again, but not right away
                 // nor more often than that, however often it changes.
@@ -502,6 +541,8 @@ impl Node {
                     }
                 }
                 s.lan_peers.insert(peer.to_string(), new);
+                // Files that started before we knew may move to it.
+                self.lan_upgrade(s, peer);
             }
             _ => {
                 s.lan_peers.remove(peer);
@@ -556,9 +597,118 @@ impl Node {
         None
     }
 
+    /// Ask the receiver of `tid` to connect to us, and wait for it.
+    pub(super) async fn lan_reverse(&self, tid: &str, peer: &str, session: u64) -> Option<Stream> {
+        let (tx, rx) = oneshot::channel();
+        let asked = self.with(|s| {
+            let live = s
+                .transfers
+                .get(tid)
+                .is_some_and(|t| t.shared.session() == session && !t.status.is_final());
+            if live {
+                s.lan_wait.insert(tid.to_string(), tx);
+                s.send(peer, json!({ "type": "lan_dial", "tid": tid }));
+            }
+            live
+        });
+        if !asked {
+            return None;
+        }
+        let stream = tokio::time::timeout(REVERSE_WAIT, rx)
+            .await
+            .ok()
+            .and_then(Result::ok);
+        self.with(|s| s.lan_wait.remove(tid));
+        stream
+    }
+
+    /// The sender of `tid` cannot reach us: connect to it, then take the
+    /// stream as one that came in.
+    pub(super) fn on_lan_dial(&self, s: &mut State, peer: &str, tid: Option<&str>) {
+        if self.0.lan.is_none() {
+            return;
+        }
+        let Some(tid) = tid else { return };
+        let waiting = s.transfers.get(tid).is_some_and(|t| {
+            t.dir == Dir::In
+                && t.friend_id == peer
+                && (t.status == Status::Receiving || t.status == Status::Paused)
+        });
+        if !waiting {
+            return;
+        }
+        let Some(target) = s.lan_target(peer) else { return };
+        let (node, peer, tid) = (self.clone(), peer.to_string(), tid.to_string());
+        self.spawn(async move {
+            let Some(mut tls) = node.lan_connect(target).await else {
+                node.with(|s| node.lan_failed(s, &peer));
+                return;
+            };
+            let mut hello = [0u8; DATA_HEADER];
+            if hex::decode_to_slice(&tid, &mut hello[..TID_BYTES]).is_err() {
+                return;
+            }
+            hello[TID_BYTES..].copy_from_slice(&REVERSE_HELLO.to_be_bytes());
+            let mut header = [0u8; DATA_HEADER];
+            let exchange = async {
+                tls.write_all(&hello).await?;
+                tls.flush().await?;
+                tls.read_exact(&mut header).await
+            };
+            if !matches!(tokio::time::timeout(TLS_TIMEOUT, exchange).await, Ok(Ok(_))) {
+                return;
+            }
+            // The sender's own header: this transfer, from where it goes on.
+            if hex::encode(&header[..TID_BYTES]) != tid {
+                return;
+            }
+            let offset = u64::from_be_bytes(header[TID_BYTES..].try_into().unwrap());
+            let source = Source::Lan(Box::new(tls));
+            node.receive_data(peer, tid, offset, source).await;
+        });
+    }
+
+    /// `peer` is next to us now: files on their way to it over QUIC go on
+    /// over the fast path, from where they are (the receiver asks for less
+    /// if it has less).
+    pub(super) fn lan_upgrade(&self, s: &mut State, peer: &str) {
+        if self.0.lan.is_none() {
+            return;
+        }
+        let Some(conn_id) = s
+            .conns
+            .get(peer)
+            .filter(|c| c.route == Some("lan"))
+            .map(|c| c.id)
+        else {
+            return;
+        };
+        if s.lan_target(peer).is_none() {
+            return;
+        }
+        let moving: Vec<(String, u64)> = s
+            .transfers
+            .iter()
+            .filter(|(_, t)| {
+                t.dir == Dir::Out
+                    && t.friend_id == peer
+                    && t.status == Status::Sending
+                    && t.conn_id == Some(conn_id)
+                    && !t.shared.lan.load(Ordering::Relaxed)
+                    && t.file_size.saturating_sub(t.bytes()) >= UPGRADE_MIN
+            })
+            .map(|(tid, t)| (tid.clone(), t.bytes()))
+            .collect();
+        for (tid, offset) in moving {
+            self.on_accept(s, peer, conn_id, &json!({ "tid": tid, "offset": offset }));
+        }
+    }
+
     /// The connection to `peer` failed: QUIC only for a while.
     pub(super) fn lan_failed(&self, s: &mut State, peer: &str) {
         let now = Instant::now();
+        // Not even the other way any more.
+        s.lan_pull.remove(peer);
         let previous = s.lan_down.get(peer).copied();
         if previous.is_some_and(|until| now < until) {
             // Several streams failing together: one failure.
@@ -640,13 +790,28 @@ impl Node {
         let offset = u64::from_be_bytes(header[TID_BYTES..].try_into().unwrap());
         // The transfer's peer must be the one holding the certificate it
         // advertised to us.
-        let peer = self.with(|s| {
+        let found = self.with(|s| {
             let t = s.transfers.get(&tid)?;
             let lan = s.lan_peers.get(&t.friend_id)?;
-            (lan.fingerprint.eq_ignore_ascii_case(&cert) && s.conns.contains_key(&t.friend_id))
-                .then(|| t.friend_id.clone())
+            if !lan.fingerprint.eq_ignore_ascii_case(&cert) || !s.conns.contains_key(&t.friend_id) {
+                return None;
+            }
+            if offset == REVERSE_HELLO {
+                // The receiver connecting for one of our streams that waits.
+                if t.dir != Dir::Out {
+                    return None;
+                }
+                return s.lan_wait.remove(&tid).map(Err);
+            }
+            Some(Ok(t.friend_id.clone()))
         })?;
-        Some((peer, tid, offset, TlsStream::Server(tls)))
+        match found {
+            Ok(peer) => Some((peer, tid, offset, TlsStream::Server(tls))),
+            Err(waiting) => {
+                let _ = waiting.send(TlsStream::Server(tls));
+                None
+            }
+        }
     }
 }
 

@@ -12,7 +12,7 @@ export const PendingMark = () => (
 
 // Message input: Enter sends, Shift+Enter starts a new line; it grows with
 // its text.
-export function ChatInput({ value, onChange, onSend, placeholder, disabled, maxLength, error, before, popup, onKey, inputRef }: {
+export function ChatInput({ value, onChange, onSend, placeholder, disabled, maxLength, error, before, popup, onKey, inputRef, onPasteFiles }: {
   value: string;
   onChange: (value: string) => void;
   onSend: () => void;
@@ -27,6 +27,8 @@ export function ChatInput({ value, onChange, onSend, placeholder, disabled, maxL
   // Sees the keys first; true when it handled the key.
   onKey?: (e: KeyboardEvent<HTMLTextAreaElement>) => boolean;
   inputRef?: RefObject<HTMLTextAreaElement | null>;
+  // Files pasted (a screenshot, files copied in the explorer): sent.
+  onPasteFiles?: (files: File[]) => void;
 }) {
   const own = useRef<HTMLTextAreaElement>(null);
   const ref = inputRef ?? own;
@@ -57,6 +59,12 @@ export function ChatInput({ value, onChange, onSend, placeholder, disabled, maxL
         maxLength={maxLength}
         disabled={disabled}
         onChange={e => onChange(e.target.value)}
+        onPaste={e => {
+          const files = Array.from(e.clipboardData.files);
+          if (!onPasteFiles || files.length === 0) return;
+          e.preventDefault();
+          onPasteFiles(files);
+        }}
         onKeyDown={e => {
           if (onKey?.(e)) return;
           if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
