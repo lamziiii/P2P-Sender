@@ -3908,7 +3908,7 @@ dependencies = [
 name = "p2pshare"
 version = "3.4.8+5"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "blake3",
  "bytes",
  "hex",
