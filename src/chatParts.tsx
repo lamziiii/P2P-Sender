@@ -1,5 +1,6 @@
 import { useLayoutEffect, useRef } from 'react';
 import type { KeyboardEvent, ReactNode, RefObject } from 'react';
+import { tr } from './i18n';
 import { Icon } from './icons';
 
 // The input grows up to this many lines, then scrolls.
@@ -7,7 +8,7 @@ const MAX_LINES = 5;
 
 // Shown on our message until the other side has it.
 export const PendingMark = () => (
-  <span className="pending-mark" title="En attente de livraison"><Icon name="clock" size={11} /></span>
+  <span className="pending-mark" title={tr('En attente de livraison', 'Waiting to be delivered')}><Icon name="clock" size={11} /></span>
 );
 
 // Message input: Enter sends, Shift+Enter starts a new line; it grows with
@@ -73,7 +74,7 @@ export function ChatInput({ value, onChange, onSend, placeholder, disabled, maxL
           }
         }}
       />
-      <button className="btn btn-icon" title="Envoyer" disabled={disabled} onClick={onSend}><Icon name="send" /></button>
+      <button className="btn btn-icon" title={tr('Envoyer', 'Send')} disabled={disabled} onClick={onSend}><Icon name="send" /></button>
     </div>
   );
 }
@@ -96,7 +97,7 @@ export function ChatSearch({ query, onQuery, index, count, onStep, onClose }: {
         <input
           className="input"
           autoFocus
-          placeholder="Rechercher dans la discussion"
+          placeholder={tr('Rechercher dans la discussion', 'Search the chat')}
           value={query}
           onChange={e => onQuery(e.target.value)}
           onKeyDown={e => {
@@ -111,9 +112,9 @@ export function ChatSearch({ query, onQuery, index, count, onStep, onClose }: {
         />
       </div>
       <span className="search-count">{query.trim() ? (count > 0 ? `${index + 1}/${count}` : '0') : ''}</span>
-      <button className="icon-btn small" title="Précédent (plus ancien)" disabled={count === 0} onClick={() => onStep(-1)}><Icon name="chevronUp" size={14} /></button>
-      <button className="icon-btn small" title="Suivant (plus récent)" disabled={count === 0} onClick={() => onStep(1)}><Icon name="chevronDown" size={14} /></button>
-      <button className="icon-btn small" title="Fermer la recherche" onClick={onClose}><Icon name="close" size={14} /></button>
+      <button className="icon-btn small" title={tr('Précédent (plus ancien)', 'Previous (older)')} disabled={count === 0} onClick={() => onStep(-1)}><Icon name="chevronUp" size={14} /></button>
+      <button className="icon-btn small" title={tr('Suivant (plus récent)', 'Next (newer)')} disabled={count === 0} onClick={() => onStep(1)}><Icon name="chevronDown" size={14} /></button>
+      <button className="icon-btn small" title={tr('Fermer la recherche', 'Close the search')} onClick={onClose}><Icon name="close" size={14} /></button>
     </div>
   );
 }

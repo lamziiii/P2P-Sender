@@ -45,7 +45,7 @@ const READ_RETRY_DELAY: Duration = Duration::from_millis(200);
 const KEYCHAIN_SERVICE: &str = "com.p2pshare.app.vault";
 
 enum Vault {
-    Ready { key: LessSafeKey, raw: [u8; KEY_LEN] },
+    Ready { key: Box<LessSafeKey>, raw: [u8; KEY_LEN] },
     Unavailable(String),
 }
 
@@ -67,7 +67,7 @@ pub fn init(dir: &Path) -> bool {
 fn ready(raw: [u8; KEY_LEN]) -> Vault {
     let key = UnboundKey::new(&CHACHA20_POLY1305, &raw).expect("key length");
     Vault::Ready {
-        key: LessSafeKey::new(key),
+        key: Box::new(LessSafeKey::new(key)),
         raw,
     }
 }

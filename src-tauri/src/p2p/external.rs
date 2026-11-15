@@ -98,27 +98,27 @@ impl Node {
             Status::Receiving => {}
             // Empty files are saved as soon as they are accepted.
             Status::Finishing | Status::Completed if size == 0 => return Ok(()),
-            _ => return Err("Transfert non accepté"),
+            _ => return Err(crate::lang::tr("Transfert non accepté", "Transfer not accepted")),
         }
 
         let mut slot = shared.writer.lock().await;
         if slot.is_none() {
-            return Err("Transfert non accepté");
+            return Err(crate::lang::tr("Transfert non accepté", "Transfer not accepted"));
         }
         if shared.session() != session || shared.bytes.load(Ordering::Relaxed) != 0 {
-            return Err("Transfert déjà commencé");
+            return Err(crate::lang::tr("Transfert déjà commencé", "Transfer already started"));
         }
         let large = match self.large_buffer(&mut slot).await {
             Ok(permit) => permit,
             Err(_) => {
                 drop(slot);
-                let error = "Écriture sur le disque impossible";
+                let error = crate::lang::tr("Écriture sur le disque impossible", "Could not write to disk");
                 self.external_stop(tid, Status::Error, Some(error));
                 return Err(error);
             }
         };
         let Some(writer) = slot.as_mut() else {
-            return Err("Transfert non accepté");
+            return Err(crate::lang::tr("Transfert non accepté", "Transfer not accepted"));
         };
         let mut cancel = shared.session.subscribe();
         let mut pos = 0;
@@ -129,25 +129,25 @@ impl Node {
                 // Cancelled here: already stopped by whoever cancelled it.
                 _ = session_changed(&mut cancel, session) => {
                     cancelled = true;
-                    break Some("Transfert annulé");
+                    break Some(crate::lang::tr("Transfert annulé", "Transfer cancelled"));
                 }
             };
             let Some(chunk) = chunk else {
-                break Some("Transfert interrompu par l’expéditeur");
+                break Some(crate::lang::tr("Transfert interrompu par l’expéditeur", "Transfer stopped by the sender"));
             };
             // The speed limit holds the sender back from here.
             tokio::select! {
                 _ = self.0.down.take(chunk.len()) => {}
                 _ = session_changed(&mut cancel, session) => {
                     cancelled = true;
-                    break Some("Transfert annulé");
+                    break Some(crate::lang::tr("Transfert annulé", "Transfer cancelled"));
                 }
             }
             if pos + chunk.len() as u64 > size {
-                break Some("Taille reçue incohérente");
+                break Some(crate::lang::tr("Taille reçue incohérente", "Inconsistent size received"));
             }
             if writer.write_all(&chunk).await.is_err() {
-                break Some("Écriture sur le disque impossible");
+                break Some(crate::lang::tr("Écriture sur le disque impossible", "Could not write to disk"));
             }
             pos += chunk.len() as u64;
             shared.bytes.store(pos, Ordering::Relaxed);
@@ -163,10 +163,10 @@ impl Node {
         drop(large);
         drop(slot);
         if cancelled {
-            return Err("Transfert annulé");
+            return Err(crate::lang::tr("Transfert annulé", "Transfer cancelled"));
         }
         let failure = match failure {
-            None if flushed.is_err() => Some("Écriture sur le disque impossible"),
+            None if flushed.is_err() => Some(crate::lang::tr("Écriture sur le disque impossible", "Could not write to disk")),
             failure => failure,
         };
         match failure {

@@ -4,7 +4,7 @@ App de chat et d'envoi de fichiers en pair-à-pair : Tauri 2 + Rust (iroh/QUIC) 
 
 ## Règle n°1 : chaque modification doit marcher sur toutes les plateformes
 
-L'app est distribuée sur **Windows, macOS (Apple Silicon), Linux (AppImage et .deb) et Android (arm64)**. Toute modification, même petite, doit être vérifiée pour chacune d'elles avant d'être considérée comme terminée :
+L'app est distribuée sur **Windows, macOS (Apple Silicon et Intel), Linux (AppImage et .deb) et Android (arm64)**. Toute modification, même petite, doit être vérifiée pour chacune d'elles avant d'être considérée comme terminée :
 
 - **Une fonction ajoutée existe partout**, ou elle est explicitement absente là où elle ne peut pas exister : un message clair à l'utilisateur, l'option cachée dans l'interface. Jamais de fonction qui casse en silence sur une plateforme.
 - **Code Rust propre à un système** : derrière `#[cfg(...)]` (`windows`, `target_os = "macos"`, `target_os = "linux"`, `target_os = "android"`, `desktop`, `mobile`). Vérifier que chaque branche existe et compile, y compris le cas « autres systèmes ».
@@ -12,6 +12,7 @@ L'app est distribuée sur **Windows, macOS (Apple Silicon), Linux (AppImage et .
 - **Interface** : ce qui diffère sur téléphone passe par `isMobile` / `byPlatform` (`src/platform.ts`) et la classe CSS `.mobile`. L'apparence et le comportement sur PC ne doivent pas changer à cause d'une adaptation mobile, et inversement.
 - **Côté Android natif** (`src-tauri/gen/android`) : penser au manifeste (permissions, services), au code Kotlin et aux règles de stockage (fichiers en `content://`, `Download/P2PShare`).
 - **Textes** : ils doivent avoir du sens partout. Par exemple « ordinateur » contre « appareil », « cliquez » contre « touchez », « barre des tâches » qui n'existe pas sur téléphone.
+- **Deux langues** : l'app est en français et en anglais (langue du système, ou choisie dans Paramètres → Général). Tout texte montré à l'utilisateur s'écrit dans les deux : `tr('…', '…')` dans l'interface (`src/i18n.ts`), `lang::tr` / `trf!` côté Rust (`src-tauri/src/lang.rs` : notifications, menu de la barre des tâches, erreurs affichées), `Lang.tr` côté Kotlin (`Lang.kt`). La page `docs/ami/index.html` porte l'anglais dans `data-en`.
 
 ### Vérifications à faire
 
@@ -37,7 +38,7 @@ Des amis peuvent garder une ancienne version (3.3, 3.4…). Les messages entre p
 
 ## Release
 
-- **Changelog obligatoire à chaque mise à jour** : chaque version a sa section dans `CHANGELOG.md`, `## x.y.z — <date en français>`, puis une ligne `- ` par changement (le mot-clé en `**gras**`). Elle est écrite pour les utilisateurs : en français, avec « vous », ce qui change pour eux et pas comment c'est codé ; les corrections regroupées sur une ligne ; une note à la fin si les amis doivent aussi mettre à jour. Dès qu'une modification change quelque chose pour les utilisateurs, l'ajouter dans la section de la prochaine version (la créer au besoin, avec « à venir » à la place de la date) sans attendre la release ; mettre la vraie date au moment de la release, le workflow refuse une section sans date. Cette section s'affiche dans l'app après la mise à jour et dans Paramètres → À propos (`src/releaseNotes.ts`), sur la page de la release GitHub et dans les notes de la mise à jour : une release stable sans elle est refusée par le workflow.
+- **Changelog obligatoire à chaque mise à jour** : chaque version a sa section dans `CHANGELOG.md`, `## x.y.z — <date en français>`, puis une ligne `- ` par changement (le mot-clé en `**gras**`). Elle est écrite pour les utilisateurs : en français, avec « vous », ce qui change pour eux et pas comment c'est codé ; les corrections regroupées sur une ligne ; une note à la fin si les amis doivent aussi mettre à jour. La même section, traduite, va dans `CHANGELOG.en.md` (« upcoming » à la place de la date, puis la date en anglais) : l'app la montre en anglais. Dès qu'une modification change quelque chose pour les utilisateurs, l'ajouter dans la section de la prochaine version (la créer au besoin, avec « à venir » à la place de la date) sans attendre la release ; mettre la vraie date au moment de la release, le workflow refuse une section sans date. Cette section s'affiche dans l'app après la mise à jour et dans Paramètres → À propos (`src/releaseNotes.ts`), sur la page de la release GitHub et dans les notes de la mise à jour : une release stable sans elle est refusée par le workflow.
 - **Version** : `npm run set-version x.y.z` (ou `x.y.z.n`, un quatrième chiffre facultatif à partir de 1) l'écrit dans `package.json` et son lock, `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml` et `Cargo.lock` (le build utilise `--locked`). Cargo, npm et Tauri ne prennent que trois chiffres : le quatrième y est écrit en métadonnée semver (`3.4.7+2`), mais le tag (`v3.4.7.2`), `CHANGELOG.md` (`## 3.4.7.2 — …`), l'app, les fichiers de la release et winget disent `3.4.7.2`. La mise à jour automatique le compare (`update::is_newer`), et la signature porte `3.4.7+2`, comme `latest.json`. Ne pas utiliser `npm version`, qui retire le quatrième chiffre.
 - **Secrets GitHub obligatoires** pour une release stable : `ANDROID_KEYSTORE_*` (APK) et `TAURI_SIGNING_PRIVATE_KEY` / `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` (mises à jour). Sans eux, la publication s'arrête.
 - **Clés** : dans `key/` (ignoré par git), ne jamais les déplacer ni les modifier. Vérifier que `key/` reste ignoré avant chaque commit. Perdre la clé de mise à jour bloque les mises à jour automatiques pour toujours.
@@ -51,5 +52,5 @@ Des amis peuvent garder une ancienne version (3.3, 3.4…). Les messages entre p
 
 - **Attribution** : ne jamais mentionner Claude comme auteur ou co-auteur, nulle part : commits, PR, fichiers, notes de version.
 - **Commentaires du code** : en anglais, courts.
-- **Interface** : textes en français, avec « vous ».
+- **Interface** : textes en français, avec « vous », et leur traduction anglaise (voir « Deux langues »).
 - **Style** : suivre celui du code existant (densité de commentaires, noms, structure).

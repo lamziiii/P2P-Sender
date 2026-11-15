@@ -5,6 +5,7 @@ import type { LocalSendDevice, LocalSendMessage } from './api';
 import { ChatInput, PendingMark } from './chatParts';
 import { chatRows } from './chatRows';
 import { formatTime, plural } from './format';
+import { tr } from './i18n';
 import { Icon } from './icons';
 import { WindowButtons } from './PinButton';
 import { isMobile } from './platform';
@@ -69,7 +70,7 @@ export function LocalSendChatView({ fingerprint, notice, dropping, onBack, onToa
     endRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
-  const name = device?.alias || alias || 'Appareil LocalSend';
+  const name = device?.alias || alias || tr('Appareil LocalSend', 'LocalSend device');
 
   // Not laid out again on each key typed.
   const rows = useMemo(() => chatRows(messages, {
@@ -84,12 +85,12 @@ export function LocalSendChatView({ fingerprint, notice, dropping, onBack, onToa
             <div className="bubble-time">
               {formatTime(m.ts)}
               {m.mine && m.status === 'pending' && <PendingMark />}
-              {m.mine && m.status === 'delivered' && <span title="Reçu par l’appareil"> ✓✓</span>}
-              {m.unverified && <span title="Ancienne version de LocalSend : rien ne prouve que ce message vient bien de cet appareil."> · non vérifié</span>}
+              {m.mine && m.status === 'delivered' && <span title={tr('Reçu par l’appareil', 'Received by the device')}> ✓✓</span>}
+              {m.unverified && <span title={tr('Ancienne version de LocalSend : rien ne prouve que ce message vient bien de cet appareil.', 'Older LocalSend: nothing proves this message comes from this device.')}>{tr(' · non vérifié', ' · unverified')}</span>}
             </div>
           )}
           {m.mine && m.status === 'failed' && (
-            <div className="bubble-time" style={{ color: 'var(--danger)' }}>Non envoyé{m.error ? ` : ${m.error}` : ''}</div>
+            <div className="bubble-time" style={{ color: 'var(--danger)' }}>{tr('Non envoyé', 'Not sent')}{m.error ? `${tr(' : ', ': ')}${m.error}` : ''}</div>
           )}
         </div>
       </div>
@@ -120,7 +121,12 @@ export function LocalSendChatView({ fingerprint, notice, dropping, onBack, onToa
     setError('');
     try {
       const count = await api.sendToLocalSend(fingerprint);
-      if (count > 0) onToast(`${plural(count, 'fichier envoyé', 'fichiers envoyés')} à ${name} : suivez l’envoi dans l’onglet Transferts.`);
+      if (count > 0) {
+        onToast(tr(
+          `${plural(count, 'fichier envoyé', 'fichiers envoyés')} à ${name} : suivez l’envoi dans l’onglet Transferts.`,
+          `${plural(count, 'file sent', 'files sent')} to ${name}: follow it in the Transfers tab.`,
+        ));
+      }
     } catch (e) {
       setError(String(e));
     }
@@ -130,14 +136,14 @@ export function LocalSendChatView({ fingerprint, notice, dropping, onBack, onToa
     <div className={`app ${dropping ? 'dropping' : ''}`}>
       <div className="header">
         <div className="brand">
-          <button className="icon-btn" title="Retour" onClick={onBack}><Icon name="back" /></button>
+          <button className="icon-btn" title={tr('Retour', 'Back')} onClick={onBack}><Icon name="back" /></button>
           <div className="avatar small"><Icon name={device?.deviceType === 'mobile' ? 'phone' : 'monitor'} size={14} /></div>
           <div className="header-title">
             <div className="title">{name}</div>
             <div className={`subtitle ${device ? 'online' : ''}`}>
               {device
-                ? `LocalSend · ${device.secure ? 'même réseau, chiffré' : 'non chiffré (ancienne version)'}`
-                : 'LocalSend · introuvable sur le réseau'}
+                ? `LocalSend · ${device.secure ? tr('même réseau, chiffré', 'same network, encrypted') : tr('non chiffré (ancienne version)', 'not encrypted (older version)')}`
+                : tr('LocalSend · introuvable sur le réseau', 'LocalSend · not found on the network')}
             </div>
           </div>
         </div>
@@ -152,9 +158,8 @@ export function LocalSendChatView({ fingerprint, notice, dropping, onBack, onToa
         {messages.length === 0 && (
           <div className="empty-state">
             <Icon name="chat" size={32} />
-            {isMobile
-              ? 'Aucun message. Le texte envoyé depuis LocalSend sur cet appareil arrivera ici.'
-              : 'Aucun message. Le texte envoyé depuis LocalSend sur cet appareil arrivera ici. Glissez un fichier ici pour le lui envoyer.'}
+            {tr('Aucun message. Le texte envoyé depuis LocalSend sur cet appareil arrivera ici.', 'No messages. Text sent from LocalSend on this device will arrive here.')}
+            {!isMobile && tr(' Glissez un fichier ici pour le lui envoyer.', ' Drop a file here to send it.')}
           </div>
         )}
         {rows}
@@ -165,14 +170,14 @@ export function LocalSendChatView({ fingerprint, notice, dropping, onBack, onToa
         value={input}
         onChange={setInput}
         onSend={send}
-        placeholder={device ? 'Écrire un message…' : 'Appareil introuvable : ouvrez LocalSend dessus'}
+        placeholder={device ? tr('Écrire un message…', 'Write a message…') : tr('Appareil introuvable : ouvrez LocalSend dessus', 'Device not found: open LocalSend on it')}
         maxLength={MAX_TEXT}
         error={error}
         onPasteFiles={device ? onPasteFiles : undefined}
         before={
           <button
             className="icon-btn attach"
-            title={device ? 'Envoyer un fichier' : 'Appareil introuvable sur le réseau'}
+            title={device ? tr('Envoyer un fichier', 'Send a file') : tr('Appareil introuvable sur le réseau', 'Device not found on the network')}
             disabled={!device}
             onClick={attachFiles}
           >

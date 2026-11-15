@@ -478,7 +478,7 @@ impl<F: FnOnce(Result<(), String>)> Done<F> {
 impl<F: FnOnce(Result<(), String>)> Drop for Done<F> {
     fn drop(&mut self) {
         if let Some(done) = self.0.take() {
-            done(Err("LocalSend désactivé".into()));
+            done(Err(crate::lang::tr("LocalSend désactivé", "LocalSend is off").into()));
         }
     }
 }
@@ -500,6 +500,9 @@ pub struct Hooks {
     pub on_text: Arc<dyn Fn(TextSender, String) + Send + Sync>,
     /// The list of devices changed.
     pub on_devices: Arc<dyn Fn() + Send + Sync>,
+    /// A device we exchanged with proved its fingerprint: kept for the next
+    /// runs (see `remember_verified`), never to send it anything in clear.
+    pub on_proven: Arc<dyn Fn(String) + Send + Sync>,
 }
 
 struct Inner {
@@ -670,7 +673,7 @@ impl LocalSend {
                 tasks.push(tokio::spawn(inner.clone().discovery(socket, signals_rx)).abort_handle());
                 None
             }
-            Err(e) => Some(format!("Découverte automatique indisponible : {e}")),
+            Err(e) => Some(crate::trf!("Découverte automatique indisponible : {e}", "Automatic discovery unavailable: {e}")),
         };
         Ok(LocalSend {
             inner,
@@ -763,8 +766,11 @@ impl LocalSend {
         text: String,
         done: impl FnOnce(Result<(), String>) + Send + 'static,
     ) -> Result<(), &'static str> {
-        const NOT_FOUND: &str = "Appareil introuvable : est-il allumé, avec LocalSend ouvert ?";
-        let target = self.inner.target(fingerprint).ok_or(NOT_FOUND)?;
+        let not_found = crate::lang::tr(
+            "Appareil introuvable : est-il allumé, avec LocalSend ouvert ?",
+            "Device not found: is it on, with LocalSend open?",
+        );
+        let target = self.inner.target(fingerprint).ok_or(not_found)?;
         let inner = self.inner.clone();
         let done = Done(Some(done));
         let task = self.inner.rt.spawn(async move {
@@ -773,7 +779,7 @@ impl LocalSend {
                     inner.note_known(&device);
                     inner.send_text(device, text).await
                 }
-                None => Err(NOT_FOUND.into()),
+                None => Err(not_found.into()),
             };
             done.call(result);
         });
@@ -833,7 +839,7 @@ impl Drop for LocalSend {
             for tid in &session.tids {
                 self.inner
                     .node
-                    .external_stop(tid, Status::Cancelled, Some("LocalSend désactivé"));
+                    .external_stop(tid, Status::Cancelled, Some(crate::lang::tr("LocalSend désactivé", "LocalSend is off")));
             }
         }
     }
@@ -1045,17 +1051,24 @@ impl Inner {
 
     /// Keep where `device` is, to find it again once it left the list.
     fn note_known(&self, device: &Device) {
-        let mut known = self.known();
-        if !known.contains_key(&device.fingerprint) && known.len() >= MAX_KNOWN {
-            let oldest = known
-                .iter()
-                .min_by_key(|(_, (_, seen))| *seen)
-                .map(|(k, _)| k.clone());
-            if let Some(oldest) = oldest {
-                known.remove(&oldest);
+        let newly_proven = {
+            let mut known = self.known();
+            if !known.contains_key(&device.fingerprint) && known.len() >= MAX_KNOWN {
+                let oldest = known
+                    .iter()
+                    .min_by_key(|(_, (_, seen))| *seen)
+                    .map(|(k, _)| k.clone());
+                if let Some(oldest) = oldest {
+                    known.remove(&oldest);
+                }
             }
+            let before = known
+                .insert(device.fingerprint.clone(), (device.clone(), Instant::now()));
+            device.verified && !before.is_some_and(|(d, _)| d.verified)
+        };
+        if newly_proven {
+            (self.hooks.on_proven)(device.fingerprint.clone());
         }
-        known.insert(device.fingerprint.clone(), (device.clone(), Instant::now()));
     }
 
     /// The device to send to, and whether it is listed: otherwise it was
@@ -1663,7 +1676,7 @@ impl Inner {
                     Ok(answer) => answer.unwrap_or(false),
                     Err(_) => {
                         self.node
-                            .external_stop(&tid, Status::Cancelled, Some("Sans réponse à temps"));
+                            .external_stop(&tid, Status::Cancelled, Some(crate::lang::tr("Sans réponse à temps", "No answer in time")));
                         false
                     }
                 });
@@ -1774,7 +1787,7 @@ impl Inner {
         drop(slot);
         for tid in &tids {
             self.node
-                .external_stop(tid, Status::Cancelled, Some("Annulé par l’expéditeur"));
+                .external_stop(tid, Status::Cancelled, Some(crate::lang::tr("Annulé par l’expéditeur", "Cancelled by the sender")));
         }
     }
 
@@ -1817,7 +1830,7 @@ impl Inner {
                     self.node.external_stop(
                         tid,
                         Status::Error,
-                        Some("L’expéditeur ne répond plus"),
+                        Some(crate::lang::tr("L’expéditeur ne répond plus", "The sender no longer answers")),
                     );
                 }
                 return;
@@ -1870,7 +1883,7 @@ impl Drop for SessionGuard {
         for tid in &tids {
             self.inner
                 .node
-                .external_stop(tid, Status::Cancelled, Some("Annulé par l’expéditeur"));
+                .external_stop(tid, Status::Cancelled, Some(crate::lang::tr("Annulé par l’expéditeur", "Cancelled by the sender")));
         }
     }
 }

@@ -1,4 +1,5 @@
 import { useEffect } from 'react';
+import { tr } from './i18n';
 import type { Line, Release } from './releaseNotes';
 
 // **bold** in a line.
@@ -6,7 +7,7 @@ function Rich({ text }: { text: string }) {
   return <>{text.split('**').map((part, i) => (i % 2 ? <strong key={i}>{part}</strong> : part))}</>;
 }
 
-export function ReleaseLines({ lines }: { lines: Line[] }) {
+function ReleaseLines({ lines }: { lines: Line[] }) {
   return (
     <>
       <ul className="changelog-list">
@@ -43,7 +44,7 @@ export function ChangelogDialog({ title, releases, onClose }: {
             </div>
           ))}
         </div>
-        <button className="btn" style={{ width: '100%', marginTop: 12 }} autoFocus onClick={onClose}>Fermer</button>
+        <button className="btn" style={{ width: '100%', marginTop: 12 }} autoFocus onClick={onClose}>{tr('Fermer', 'Close')}</button>
       </div>
     </div>
   );

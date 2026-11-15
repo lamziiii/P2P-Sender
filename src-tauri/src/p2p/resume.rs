@@ -45,6 +45,9 @@ struct KeptFolder {
     name: String,
     files: u64,
     size: u64,
+    /// Incoming: the user accepted the whole folder, programs included.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    accepted: bool,
 }
 
 impl Transfer {
@@ -93,6 +96,7 @@ impl Transfer {
                 name: f.name.clone(),
                 files: f.files,
                 size: f.size,
+                accepted: false,
             }),
             held: self.held,
             in_chat: self.in_chat,
@@ -112,6 +116,15 @@ impl State {
             .values()
             .filter_map(|t| Some((t.seq, t.kept()?)))
             .collect();
+        // Only a real yes comes back: auto-accepted files never take programs.
+        for (_, k) in &mut list {
+            if let (false, Some(folder)) = (k.out, k.folder.as_mut()) {
+                folder.accepted = self
+                    .folders_in
+                    .get(&(k.friend.clone(), folder.id.clone()))
+                    .is_some_and(|f| f.decision == Some(true));
+            }
+        }
         list.sort_by_key(|(seq, _)| *seq);
         self.kept.data = list.into_iter().map(|(_, k)| k).collect();
         self.kept.mark_dirty();
@@ -158,6 +171,7 @@ impl Node {
                 let writer = BufWriter::with_capacity(IDLE_BUFFER, tokio::fs::File::from_std(file));
                 (len, Some(writer))
             };
+            let folder_accepted = k.folder.as_ref().is_some_and(|f| f.accepted);
             let folder = k.folder.map(|f| {
                 folders
                     .entry(f.id.clone())
@@ -200,12 +214,15 @@ impl Node {
                     if k.out {
                         s.folders_out.entry(folder.id.clone()).or_insert(None);
                     } else {
-                        // Its other files go to the same place, without asking again.
+                        // Its other files go to the same place; without asking
+                        // again only if the user said yes to the whole folder.
                         let entry = s
                             .folders_in
                             .entry((k.friend.clone(), folder.id.clone()))
                             .or_default();
-                        entry.decision = Some(true);
+                        if folder_accepted {
+                            entry.decision = Some(true);
+                        }
                         entry.root = entry.root.take().or(k.root);
                         entry.files += 1;
                         entry.notified = true;

@@ -1,15 +1,19 @@
-import { useEffect, useRef, useState } from 'react';
+import { useState } from 'react';
 import { api } from './api';
 import type { Friend, InviteLink } from './api';
+import { tr } from './i18n';
 import { Icon } from './icons';
 
 // Invitation links (see src-tauri/src/invite.rs): one friend sends a link,
 // the other opens it; both are then friends.
 
-const ACCEPT_ERRORS: Record<string, string> = {
+const ACCEPT_ERRORS: Record<string, string> = tr({
   invalid_link: 'Ce lien d’invitation n’est pas valide.',
   self: 'C’est votre propre lien d’invitation.',
-};
+}, {
+  invalid_link: 'This invitation link is not valid.',
+  self: 'This is your own invitation link.',
+});
 
 // Makes a link and copies it.
 export function InviteLinkMaker() {
@@ -24,7 +28,7 @@ export function InviteLinkMaker() {
         setCopied(true);
         setTimeout(() => setCopied(false), 2000);
       },
-      () => setError('Copie impossible : sélectionnez le lien pour le copier.'),
+      () => setError(tr('Copie impossible : sélectionnez le lien pour le copier.', 'Copy failed: select the link to copy it.')),
     );
   };
 
@@ -44,17 +48,17 @@ export function InviteLinkMaker() {
       {link ? (
         <div className="id-box-inline">
           <div className="id-value" title={link}>{link}</div>
-          <button className="btn btn-secondary btn-small" onClick={() => copy(link)}><Icon name="copy" size={14} />{copied ? 'Copié !' : 'Copier'}</button>
+          <button className="btn btn-secondary btn-small" onClick={() => copy(link)}><Icon name="copy" size={14} />{copied ? tr('Copié !', 'Copied!') : tr('Copier', 'Copy')}</button>
         </div>
       ) : (
-        <button className="btn" onClick={create}><Icon name="plus" size={14} />Créer un lien d’invitation</button>
+        <button className="btn" onClick={create}><Icon name="plus" size={14} />{tr('Créer un lien d’invitation', 'Create an invitation link')}</button>
       )}
       <div className="setting-sub">
         {link
-          ? 'Envoyez ce lien à votre ami (mail, message…) : valable 7 jours, pour une seule personne.'
-          : 'Envoyez-le à votre ami par mail ou message : il l’ouvre, et vous voilà amis.'}
+          ? tr('Envoyez ce lien à votre ami (mail, message…) : valable 7 jours, pour une seule personne.', 'Send this link to your friend (email, message…): valid for 7 days, for one person.')
+          : tr('Envoyez-le à votre ami par mail ou message : il l’ouvre, et vous voilà amis.', 'Send it to your friend by email or message: they open it, and you are friends.')}
       </div>
-      {link && <button className="btn-link" style={{ alignSelf: 'flex-start' }} onClick={create}>Créer un autre lien</button>}
+      {link && <button className="btn-link" style={{ alignSelf: 'flex-start' }} onClick={create}>{tr('Créer un autre lien', 'Create another link')}</button>}
       {error && <div className="error-text">{error}</div>}
     </div>
   );
@@ -82,73 +86,96 @@ export function InviteFriend({ onOpenLink, onClose }: {
   return (
     <div className="card stack">
       <div className="section-header-row">
-        <div className="card-label" style={{ marginBottom: 0 }}>Inviter un ami</div>
-        {onClose && <button className="icon-btn small" title="Fermer" onClick={onClose}><Icon name="close" size={14} /></button>}
+        <div className="card-label" style={{ marginBottom: 0 }}>{tr('Inviter un ami', 'Invite a friend')}</div>
+        {onClose && <button className="icon-btn small" title={tr('Fermer', 'Close')} onClick={onClose}><Icon name="close" size={14} /></button>}
       </div>
       <InviteLinkMaker />
-      <div className="card-label" style={{ margin: '4px 0 0' }}>Vous avez reçu un lien ?</div>
-      <div className="setting-sub">S’il n’ouvre pas l’app, collez-le ici.</div>
+      <div className="card-label" style={{ margin: '4px 0 0' }}>{tr('Vous avez reçu un lien ?', 'Received a link?')}</div>
+      <div className="setting-sub">{tr('S’il n’ouvre pas l’app, collez-le ici.', 'If it does not open the app, paste it here.')}</div>
       <input
         className="input"
-        placeholder="Lien d’invitation"
+        placeholder={tr('Lien d’invitation', 'Invitation link')}
         value={pasted}
         onChange={e => { setPasted(e.target.value); setError(''); }}
         onKeyDown={e => e.key === 'Enter' && open()}
       />
       {error && <div className="error-text">{error}</div>}
-      <button className="btn btn-secondary" disabled={!pasted.trim()} onClick={open}>Ouvrir le lien</button>
+      <button className="btn btn-secondary" disabled={!pasted.trim()} onClick={open}>{tr('Ouvrir le lien', 'Open the link')}</button>
     </div>
   );
 }
 
-// A link opened (or pasted) is accepted at once: opening it is the yes.
-// Shown only while adding, when it fails, or when there is nothing to add.
+// A link opened (or pasted) asks first: a web page or another app can open
+// one, so opening it is not the yes.
 export function InviteDialog({ invite, onDone }: {
   invite: InviteLink;
   // With the friends once added.
   onDone: (added?: { friends: Friend[]; id: string; name: string }) => void;
 }) {
   const [error, setError] = useState('');
-  const who = invite.name || 'cette personne';
+  const [busy, setBusy] = useState(false);
+  const who = invite.name || tr('cette personne', 'this person');
   const adding = !invite.own && !invite.known;
-  // Once: the effect runs twice in development.
-  const started = useRef(false);
 
-  useEffect(() => {
-    if (!adding || started.current) return;
-    started.current = true;
+  const accept = () => {
+    setBusy(true);
     api.acceptInvite(invite.link).then(
       res => {
-        if ('error' in res) setError(ACCEPT_ERRORS[res.error] ?? 'Impossible d’ajouter cet ami.');
+        setBusy(false);
+        if ('error' in res) setError(ACCEPT_ERRORS[res.error] ?? tr('Impossible d’ajouter cet ami.', 'Could not add this friend.'));
         else onDone({ ...res, name: invite.name });
       },
-      () => setError('Impossible d’ajouter cet ami.'),
+      () => {
+        setBusy(false);
+        setError(tr('Impossible d’ajouter cet ami.', 'Could not add this friend.'));
+      },
     );
-  }, [adding, invite.link, invite.name, onDone]);
+  };
 
   let title;
   let text;
   if (invite.own) {
-    title = 'Votre propre lien';
-    text = 'C’est un lien que vous avez créé : envoyez-le à un ami pour qu’il vous ajoute.';
+    title = tr('Votre propre lien', 'Your own link');
+    text = tr('C’est un lien que vous avez créé : envoyez-le à un ami pour qu’il vous ajoute.', 'This is a link you created: send it to a friend so they add you.');
   } else if (invite.known) {
-    title = `${who} est déjà dans vos amis`;
-    text = 'Vous êtes déjà connectés : rien à faire.';
+    title = tr(`${who} est déjà dans vos amis`, `${who} is already your friend`);
+    text = tr('Vous êtes déjà connectés : rien à faire.', 'You are already connected: nothing to do.');
   } else if (error) {
-    title = `${who} n’a pas pu être ajouté`;
-    text = 'Demandez-lui un nouveau lien d’invitation.';
+    title = tr(`${who} n’a pas pu être ajouté`, `${who} could not be added`);
+    text = tr('Demandez-lui un nouveau lien d’invitation.', 'Ask them for a new invitation link.');
   } else {
-    title = `Ajout de ${who}…`;
-    text = 'Vous avez ouvert son lien d’invitation.';
+    title = tr(`Ajouter ${who} à vos amis ?`, `Add ${who} as a friend?`);
+    text = tr(
+      'Un lien d’invitation a été ouvert. Ajoutez cette personne seulement si vous attendiez son lien : elle pourra vous écrire et vous proposer des fichiers.',
+      'An invitation link was opened. Only add this person if you were expecting their link: they will be able to write to you and offer you files.',
+    );
   }
 
   return (
-    <div className="modal-backdrop" onClick={() => onDone()}>
+    <div className="modal-backdrop" onClick={() => !busy && onDone()}>
       <div className="modal stack" role="dialog" aria-modal="true" onClick={e => e.stopPropagation()}>
         <div className="modal-title">{title}</div>
         <div className="modal-text">{text}</div>
+        {adding && !error && (
+          <div className="setting-sub" title={invite.id}>
+            {tr('Identifiant', 'ID')} : <code>{invite.id.slice(0, 12)}…</code>
+          </div>
+        )}
+        {adding && !error && invite.lookalike && (
+          <div className="error-text">
+            {tr(
+              `Un de vos amis s’appelle déjà « ${invite.name} ». Ce lien vient d’un autre appareil : ce n’est peut-être pas lui.`,
+              `One of your friends is already called “${invite.name}”. This link comes from another device: it may not be them.`,
+            )}
+          </div>
+        )}
         {error && <div className="error-text">{error}</div>}
-        {(!adding || error) && (
+        {adding && !error ? (
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button className="btn btn-secondary" style={{ flex: 1 }} autoFocus disabled={busy} onClick={() => onDone()}>{tr('Annuler', 'Cancel')}</button>
+            <button className="btn" style={{ flex: 1 }} disabled={busy} onClick={accept}>{busy ? tr('Ajout…', 'Adding…') : tr('Ajouter', 'Add')}</button>
+          </div>
+        ) : (
           <button className="btn" autoFocus onClick={() => onDone()}>OK</button>
         )}
       </div>

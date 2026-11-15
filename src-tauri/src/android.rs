@@ -1,7 +1,7 @@
 //! What Android only gives to its own code: the Kotlin plugin in
 //! `gen/android/app/src/main/java/com/p2pshare/app/P2PSharePlugin.kt`
 //! (background service, notifications that open a chat, documents picked
-//! through the system, opening files, multicast, the Keystore).
+//! through the system, opening files, multicast, the Keystore, updates).
 //!
 //! Every call goes through the UI thread of the app and waits for its
 //! answer: long ones (copying a document) are done on a thread of their own
@@ -70,8 +70,8 @@ fn message(e: PluginInvokeError) -> String {
     }
 }
 
-/// Hear the activity: notification taps (open that chat) and whether it is
-/// on screen.
+/// Hear the activity: notification taps (open that chat), what other apps
+/// share with it, and whether it is on screen.
 pub fn listen(app: &AppHandle) {
     let app = app.clone();
     let channel: Channel<Value> = Channel::new(move |body| {
@@ -83,6 +83,32 @@ pub fn listen(app: &AppHandle) {
         };
         if let Some(foreground) = event.get("foreground").and_then(Value::as_bool) {
             FOREGROUND.store(foreground, Ordering::SeqCst);
+        }
+        // An update's APK downloading (see install_apk).
+        if let Some(progress) = event.get("updateProgress") {
+            let _ = tauri::Emitter::emit(&app, "update-progress", progress);
+            return Ok(());
+        }
+        // Shared from another app: documents (copied once their target is
+        // picked), or a text.
+        if let Some(shared) = event.get("shared").and_then(Value::as_array) {
+            let items = shared
+                .iter()
+                .filter_map(|item| {
+                    Some(crate::share::SharedItem {
+                        path: item.get("uri")?.as_str()?.to_string(),
+                        name: item
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .unwrap_or("fichier")
+                            .to_string(),
+                        dir: false,
+                    })
+                })
+                .collect();
+            let text = event.get("text").and_then(Value::as_str).map(str::to_string);
+            crate::share::receive(&app, items, text);
+            return Ok(());
         }
         let kind = match event.get("kind").and_then(Value::as_str) {
             Some("friend") => "friend",
@@ -190,6 +216,31 @@ struct Exported {
 pub fn export_to(path: &Path, uri: &str) -> Result<String, String> {
     call::<Exported>("exportUri", json!({ "path": path, "uri": uri }))
         .map(|e| e.name)
+        .map_err(message)
+}
+
+/// The app's language, for the texts written on the Kotlin side.
+pub fn set_language(lang: &str) {
+    call_unit("setLanguage", json!({ "lang": lang }));
+}
+
+#[derive(Deserialize)]
+struct Text {
+    text: String,
+}
+
+/// A small text from the web. Blocking.
+pub fn fetch_text(url: &str) -> Result<String, String> {
+    call::<Text>("fetchText", json!({ "url": url }))
+        .map(|t| t.text)
+        .map_err(message)
+}
+
+/// Download an update's APK (progress in `update-progress`), then open
+/// the system's installer on it. Blocking.
+pub fn install_apk(url: &str) -> Result<(), String> {
+    call::<Value>("installApk", json!({ "url": url }))
+        .map(|_| ())
         .map_err(message)
 }
 

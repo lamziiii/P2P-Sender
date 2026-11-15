@@ -5,10 +5,47 @@
 //! runs (setting `auto_update`): the data is saved, the new version
 //! installed and the app restarted. An install that fails (an installer
 //! blocked by the system…) restarts the old version, and that version is
-//! then only installed when asked, so it cannot loop. Android has none: the
-//! window links to the releases.
+//! then only installed when asked, so it cannot loop.
+//!
+//! Android reads the same latest.json (its `android` entry, which the
+//! desktop updater does not read) and, when asked, downloads the APK and
+//! opens the system's installer: it asks the user, and refuses an APK not
+//! signed like the app installed. Never by itself.
 
 use serde::Serialize;
+
+use crate::lang::tr;
+
+/// A version as shown: its optional fourth number is semver build metadata
+/// in the files (`3.4.7+2`, which Cargo, npm and Tauri take), shown as one,
+/// as in the tags and CHANGELOG.md (3.4.7.2).
+fn shown(version: &str) -> String {
+    match version.split_once('+') {
+        Some((base, n)) if !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) => {
+            format!("{base}.{n}")
+        }
+        _ => version.to_string(),
+    }
+}
+
+/// The updater's test: semver precedence, then the fourth number, which
+/// precedence leaves out (3.4.7.2 comes after 3.4.7).
+pub fn is_newer(current: &semver::Version, release: &semver::Version) -> bool {
+    let fourth = |v: &semver::Version| v.build.as_str().parse::<u64>().unwrap_or(0);
+    release
+        .cmp_precedence(current)
+        .then_with(|| fourth(release).cmp(&fourth(current)))
+        .is_gt()
+}
+
+/// Looking for a version failed (offline...), as the window says it.
+fn check_failed() -> String {
+    tr(
+        "Impossible de vérifier les mises à jour (pas de connexion ?)",
+        "Could not check for updates (no connection?)",
+    )
+    .to_string()
+}
 
 /// A newer version, for the window.
 #[derive(Clone, Serialize, PartialEq)]
@@ -31,8 +68,9 @@ mod imp {
     use tauri::{AppHandle, Emitter, Manager, State};
     use tauri_plugin_updater::{Update, UpdaterExt};
 
-    use super::UpdateView;
-    use crate::{log_save, AppState, SHOW_AFTER_RESTART};
+    use super::{check_failed, shown, UpdateView};
+    use crate::lang::tr;
+    use crate::{log_save, trf, AppState, SHOW_AFTER_RESTART};
 
     const FIRST_CHECK: Duration = Duration::from_secs(60);
     const CHECK_EVERY: Duration = Duration::from_secs(6 * 3600);
@@ -52,28 +90,6 @@ mod imp {
         app.try_state::<AppState>()
             .map(|s| s.config().data.update_failed.clone())
             .unwrap_or_default()
-    }
-
-    /// A version as shown: its optional fourth number is semver build
-    /// metadata in the files (`3.4.7+2`, which Cargo, npm and Tauri take),
-    /// shown as one, as in the tags and CHANGELOG.md (3.4.7.2).
-    fn shown(version: &str) -> String {
-        match version.split_once('+') {
-            Some((base, n)) if !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) => {
-                format!("{base}.{n}")
-            }
-            _ => version.to_string(),
-        }
-    }
-
-    /// The updater's test: semver precedence, then the fourth number, which
-    /// precedence leaves out (3.4.7.2 comes after 3.4.7).
-    pub fn is_newer(current: &semver::Version, release: &semver::Version) -> bool {
-        let fourth = |v: &semver::Version| v.build.as_str().parse::<u64>().unwrap_or(0);
-        release
-            .cmp_precedence(current)
-            .then_with(|| fourth(release).cmp(&fourth(current)))
-            .is_gt()
     }
 
     fn view(app: &AppHandle, update: &Update) -> UpdateView {
@@ -124,9 +140,9 @@ mod imp {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
-            .ok_or("Aucune mise à jour à installer.")?;
+            .ok_or(tr("Aucune mise à jour à installer.", "No update to install."))?;
         if pending.installing.swap(true, Ordering::SeqCst) {
-            return Err("La mise à jour est déjà en cours.".into());
+            return Err(tr("La mise à jour est déjà en cours.", "The update is already running.").into());
         }
         // Every view of the update shows it started, not only the one clicked.
         let _ = app.emit("update-progress", json!({ "done": 0, "total": null }));
@@ -143,7 +159,7 @@ mod imp {
             .await
             .map_err(|e| {
                 pending.installing.store(false, Ordering::SeqCst);
-                let message = format!("Téléchargement impossible : {e}");
+                let message = trf!("Téléchargement impossible : {e}", "Download failed: {e}");
                 // Also for an install started by itself: the window stops
                 // showing the download.
                 let _ = app.emit("update-error", &message);
@@ -245,9 +261,7 @@ mod imp {
 
     #[tauri::command]
     pub async fn check_update(app: AppHandle) -> Result<Option<UpdateView>, String> {
-        let found = check(&app)
-            .await
-            .map_err(|_| "Impossible de vérifier les mises à jour (pas de connexion ?)".to_string())?;
+        let found = check(&app).await.map_err(|_| check_failed())?;
         if found.is_some() && auto_update(&app) {
             install_when_idle(&app);
         }
@@ -257,6 +271,17 @@ mod imp {
     #[tauri::command]
     pub async fn install_update(app: AppHandle) -> Result<(), String> {
         install(&app, true).await
+    }
+
+    /// Updates installed from the .deb (or an .rpm) ask for the password:
+    /// the window says so next to installing them by themselves.
+    #[tauri::command]
+    pub fn update_asks_password() -> bool {
+        use tauri::utils::config::BundleType;
+        matches!(
+            tauri::utils::platform::bundle_type(),
+            Some(BundleType::Deb | BundleType::Rpm)
+        )
     }
 
     /// Install newer versions without asking; one already found goes now
@@ -273,26 +298,6 @@ mod imp {
         }
         enable
     }
-
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-
-        #[test]
-        fn fourth_number() {
-            let v = |s: &str| semver::Version::parse(s).unwrap();
-            assert!(is_newer(&v("3.4.7"), &v("3.4.7+2")));
-            assert!(is_newer(&v("3.4.7+2"), &v("3.4.7+10")));
-            assert!(is_newer(&v("3.4.7+9"), &v("3.4.8")));
-            assert!(is_newer(&v("3.4.6"), &v("3.4.7")));
-            assert!(!is_newer(&v("3.4.7+2"), &v("3.4.7")));
-            assert!(!is_newer(&v("3.4.7"), &v("3.4.7")));
-            assert!(!is_newer(&v("3.4.7"), &v("3.4.7-beta.1")));
-            assert_eq!(shown("3.4.7+2"), "3.4.7.2");
-            assert_eq!(shown("3.4.7"), "3.4.7");
-            assert_eq!(shown("3.4.7-beta.1"), "3.4.7-beta.1");
-        }
-    }
 }
 
 #[cfg(desktop)]
@@ -300,30 +305,179 @@ pub use imp::*;
 
 #[cfg(mobile)]
 mod imp {
-    use super::UpdateView;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Mutex;
+    use std::time::Duration;
 
-    const ANDROID: &str = "Sur Android, installez la nouvelle version depuis la page des versions.";
+    use serde_json::Value;
+    use tauri::{AppHandle, Emitter, Manager, State};
 
-    #[tauri::command]
-    pub fn get_update() -> Option<UpdateView> {
-        None
+    use super::{check_failed, is_newer, shown, UpdateView};
+    use crate::lang::tr;
+    use crate::{log_save, AppState};
+
+    /// The desktop updater's (tauri.conf.json).
+    const LATEST: &str =
+        "https://github.com/lamziiii/P2P-Sender/releases/latest/download/latest.json";
+    const FIRST_CHECK: Duration = Duration::from_secs(60);
+    const CHECK_EVERY: Duration = Duration::from_secs(6 * 3600);
+
+    #[derive(Clone, PartialEq)]
+    struct Found {
+        version: String,
+        notes: Option<String>,
+        apk: String,
+    }
+
+    impl Found {
+        fn view(&self) -> UpdateView {
+            UpdateView {
+                version: shown(&self.version),
+                notes: self.notes.clone(),
+                failed: false,
+            }
+        }
+    }
+
+    #[derive(Default)]
+    pub struct Pending {
+        found: Mutex<Option<Found>>,
+        installing: AtomicBool,
+    }
+
+    /// The release's version and APK, if newer than this app. A release
+    /// without an APK in latest.json (before 3.4.9) counts as none.
+    fn parse(app: &AppHandle, latest: &str) -> Option<Found> {
+        let latest: Value = serde_json::from_str(latest).ok()?;
+        let version = latest.get("version")?.as_str()?.to_string();
+        let apk = latest.get("android")?.get("url")?.as_str()?.to_string();
+        let release = semver::Version::parse(&version).ok()?;
+        if !is_newer(&app.package_info().version, &release) {
+            return None;
+        }
+        let notes = latest
+            .get("notes")
+            .and_then(Value::as_str)
+            .filter(|n| !n.trim().is_empty())
+            .map(str::to_string);
+        Some(Found { version, notes, apk })
+    }
+
+    /// Look now; a newer version is kept and told to the window.
+    async fn check(app: &AppHandle) -> Result<Option<UpdateView>, String> {
+        let text = tauri::async_runtime::spawn_blocking(|| crate::android::fetch_text(LATEST))
+            .await
+            .map_err(|e| e.to_string())??;
+        let found = parse(app, &text);
+        let view = found.as_ref().map(Found::view);
+        let known = std::mem::replace(
+            &mut *app
+                .state::<Pending>()
+                .found
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()),
+            found.clone(),
+        );
+        if found.is_some() && known != found {
+            let _ = app.emit("update-available", &view);
+        }
+        Ok(view)
+    }
+
+    pub fn start(app: &AppHandle) {
+        app.manage(Pending::default());
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(FIRST_CHECK).await;
+            loop {
+                // Offline or no release yet: tried again next time.
+                if let Err(e) = check(&app).await {
+                    eprintln!("update: {e}");
+                }
+                tokio::time::sleep(CHECK_EVERY).await;
+            }
+        });
     }
 
     #[tauri::command]
-    pub async fn check_update() -> Result<Option<UpdateView>, String> {
-        Err(ANDROID.into())
+    pub fn get_update(pending: State<Pending>) -> Option<UpdateView> {
+        pending
+            .found
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(Found::view)
     }
 
     #[tauri::command]
-    pub async fn install_update() -> Result<(), String> {
-        Err(ANDROID.into())
+    pub async fn check_update(app: AppHandle) -> Result<Option<UpdateView>, String> {
+        check(&app).await.map_err(|_| check_failed())
     }
 
+    /// Everything saved, then the APK downloaded (progress in
+    /// `update-progress`) and handed to the installer, which closes the app
+    /// once the user agrees.
+    #[tauri::command]
+    pub async fn install_update(app: AppHandle) -> Result<(), String> {
+        let pending = app.state::<Pending>();
+        let found = pending
+            .found
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+            .ok_or(tr("Aucune mise à jour à installer.", "No update to install."))?;
+        if pending.installing.swap(true, Ordering::SeqCst) {
+            return Err(tr("La mise à jour est déjà en cours.", "The update is already running.").into());
+        }
+        if let Some(state) = app.try_state::<AppState>() {
+            log_save(state.config().save_now());
+            state.save_localsend_chats();
+            state.node.save_now();
+        }
+        let _ = app.emit("update-progress", serde_json::json!({ "done": 0, "total": null }));
+        let apk = found.apk;
+        let result = tauri::async_runtime::spawn_blocking(move || crate::android::install_apk(&apk))
+            .await
+            .map_err(|e| e.to_string())
+            .and_then(|r| r);
+        pending.installing.store(false, Ordering::SeqCst);
+        // The installer is open (or it failed): the button comes back, for
+        // an install cancelled there.
+        let _ = app.emit("update-progress", Value::Null);
+        result
+    }
+
+    /// Nothing installs by itself: Android always asks.
     #[tauri::command]
     pub fn set_auto_update() -> bool {
+        false
+    }
+
+    #[tauri::command]
+    pub fn update_asks_password() -> bool {
         false
     }
 }
 
 #[cfg(mobile)]
 pub use imp::*;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fourth_number() {
+        let v = |s: &str| semver::Version::parse(s).unwrap();
+        assert!(is_newer(&v("3.4.7"), &v("3.4.7+2")));
+        assert!(is_newer(&v("3.4.7+2"), &v("3.4.7+10")));
+        assert!(is_newer(&v("3.4.7+9"), &v("3.4.8")));
+        assert!(is_newer(&v("3.4.6"), &v("3.4.7")));
+        assert!(!is_newer(&v("3.4.7+2"), &v("3.4.7")));
+        assert!(!is_newer(&v("3.4.7"), &v("3.4.7")));
+        assert!(!is_newer(&v("3.4.7"), &v("3.4.7-beta.1")));
+        assert_eq!(shown("3.4.7+2"), "3.4.7.2");
+        assert_eq!(shown("3.4.7"), "3.4.7");
+        assert_eq!(shown("3.4.7-beta.1"), "3.4.7-beta.1");
+    }
+}

@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { api } from './api';
 import type { DropTarget, Friend, InviteLink, NotifySettings } from './api';
 import { avatarColor, formatDate, initial } from './format';
+import { tr } from './i18n';
 import { Icon } from './icons';
 import { InviteFriend } from './Invite';
 import { LocalSendDevices } from './LocalSendDevices';
@@ -17,7 +18,7 @@ export function Avatar({ id, name, online, small }: { id: string; name: string; 
   return (
     <div className={`avatar ${small ? 'small' : ''}`} style={{ background: avatarColor(id), color: '#fff' }}>
       {initial(name)}
-      {online && <span className="presence" title="En ligne" />}
+      {online && <span className="presence" title={tr('En ligne', 'Online')} />}
     </div>
   );
 }
@@ -30,7 +31,7 @@ function RenameDialog({ friend, onDone }: { friend: Friend; onDone: (friends?: F
   return (
     <div className="modal-backdrop" onClick={() => onDone()}>
       <div className="modal stack" role="dialog" aria-modal="true" onClick={e => e.stopPropagation()}>
-        <div className="modal-title">Renommer</div>
+        <div className="modal-title">{tr('Renommer', 'Rename')}</div>
         <input
           className="input"
           autoFocus
@@ -42,10 +43,10 @@ function RenameDialog({ friend, onDone }: { friend: Friend; onDone: (friends?: F
             if (e.key === 'Escape') onDone();
           }}
         />
-        <div className="setting-sub">Laissez vide pour afficher son propre pseudo.</div>
+        <div className="setting-sub">{tr('Laissez vide pour afficher son propre pseudo.', 'Leave empty to show their own nickname.')}</div>
         <div style={{ display: 'flex', gap: 8 }}>
-          <button className="btn btn-secondary" style={{ flex: 1 }} onClick={() => onDone()}>Annuler</button>
-          <button className="btn" style={{ flex: 1 }} onClick={save}>Enregistrer</button>
+          <button className="btn btn-secondary" style={{ flex: 1 }} onClick={() => onDone()}>{tr('Annuler', 'Cancel')}</button>
+          <button className="btn" style={{ flex: 1 }} onClick={save}>{tr('Enregistrer', 'Save')}</button>
         </div>
       </div>
     </div>
@@ -112,9 +113,9 @@ export function FriendsTab({ friends, unread, dropTarget, localNetwork, onFriend
   return (
     <>
       <div className="section-header section-header-row">
-        <span>Amis{friends.length > 0 ? ` (${friends.length})` : ''}</span>
+        <span>{tr('Amis', 'Friends')}{friends.length > 0 ? ` (${friends.length})` : ''}</span>
         {friends.length > 0 && (
-          <button className={`icon-btn small ${adding ? 'active' : ''}`} title="Inviter un ami" onClick={() => setAdding(!adding)}>
+          <button className={`icon-btn small ${adding ? 'active' : ''}`} title={tr('Inviter un ami', 'Invite a friend')} onClick={() => setAdding(!adding)}>
             <Icon name="plus" size={14} />
           </button>
         )}
@@ -130,7 +131,7 @@ export function FriendsTab({ friends, unread, dropTarget, localNetwork, onFriend
       {friends.length > SEARCH_FROM && (
         <div className="search-box">
           <Icon name="search" size={14} />
-          <input className="input" placeholder="Rechercher un ami" value={search} onChange={e => setSearch(e.target.value)} />
+          <input className="input" placeholder={tr('Rechercher un ami', 'Search for a friend')} value={search} onChange={e => setSearch(e.target.value)} />
         </div>
       )}
 
@@ -139,12 +140,14 @@ export function FriendsTab({ friends, unread, dropTarget, localNetwork, onFriend
           {shown.map(f => {
             const count = unreadOf(f);
             let preview = f.legacy
-              ? 'Ancien ID : demandez-lui un lien d’invitation'
-              : unread[f.id]?.last ?? (f.lastText ? `${f.lastMine ? 'Vous : ' : ''}${f.lastText}` : f.online ? 'En ligne' : 'Aucun message');
+              ? tr('Ancien ID : demandez-lui un lien d’invitation', 'Old ID: ask them for an invitation link')
+              : unread[f.id]?.last ?? (f.lastText
+                ? `${f.lastMine ? tr('Vous : ', 'You: ') : ''}${f.lastText}`
+                : f.online ? tr('En ligne', 'Online') : tr('Aucun message', 'No messages'));
             // Added from their link: they must be online once to let us in.
             // Short, to fit a phone's row.
-            if (f.invite === 'pending') preview = 'En attente de sa connexion';
-            if (f.invite === 'refused') preview = 'Lien refusé : demandez-en un nouveau';
+            if (f.invite === 'pending') preview = tr('En attente de sa connexion', 'Waiting for them to connect');
+            if (f.invite === 'refused') preview = tr('Lien refusé : demandez-en un nouveau', 'Link refused: ask for a new one');
             const warn = f.legacy || f.invite === 'refused';
             return (
               <div
@@ -163,13 +166,13 @@ export function FriendsTab({ friends, unread, dropTarget, localNetwork, onFriend
                   <div className="row-top">
                     <span className={`item-title ${count > 0 ? 'unread' : ''}`}>
                       {f.name}
-                      {mutedFriends.includes(f.id) && <span className="muted-mark" title="Notifications désactivées"><Icon name="bellOff" size={12} /></span>}
+                      {mutedFriends.includes(f.id) && <span className="muted-mark" title={tr('Notifications désactivées', 'Notifications off')}><Icon name="bellOff" size={12} /></span>}
                     </span>
                     {f.lastTs > 0 && <span className="item-time">{formatDate(f.lastTs)}</span>}
                   </div>
                   <div className="row-top">
                     <span className={`item-sub ellipsis ${warn ? 'danger' : ''} ${count > 0 ? 'unread' : ''}`}>{preview}</span>
-                    {count > 0 && <span className="badge" title="Messages non lus">{count}</span>}
+                    {count > 0 && <span className="badge" title={tr('Messages non lus', 'Unread messages')}>{count}</span>}
                   </div>
                 </div>
                 <div className="item-actions" onClick={e => e.stopPropagation()}>
@@ -177,7 +180,7 @@ export function FriendsTab({ friends, unread, dropTarget, localNetwork, onFriend
                     <div className="menu-anchor">
                       <button
                         className={`icon-btn ${menu?.id === f.id && menu.kind === 'send' ? 'active' : ''}`}
-                        title={folders ? 'Envoyer un fichier ou un dossier' : 'Envoyer un fichier'}
+                        title={folders ? tr('Envoyer un fichier ou un dossier', 'Send a file or a folder') : tr('Envoyer un fichier', 'Send a file')}
                         onClick={e => {
                           e.stopPropagation();
                           // Files only: no menu to choose.
@@ -193,8 +196,8 @@ export function FriendsTab({ friends, unread, dropTarget, localNetwork, onFriend
                       </button>
                       {menu?.id === f.id && menu.kind === 'send' && (
                         <div className="menu-popover" role="menu" ref={fitOnScreen} style={{ top: menu.top, right: menu.right }}>
-                          <button role="menuitem" onClick={() => { setMenu(null); onSendFile(f.id); }}><Icon name="file" size={14} />Fichier</button>
-                          <button role="menuitem" onClick={() => { setMenu(null); onSendFolder(f.id); }}><Icon name="folder" size={14} />Dossier</button>
+                          <button role="menuitem" onClick={() => { setMenu(null); onSendFile(f.id); }}><Icon name="file" size={14} />{tr('Fichier', 'File')}</button>
+                          <button role="menuitem" onClick={() => { setMenu(null); onSendFolder(f.id); }}><Icon name="folder" size={14} />{tr('Dossier', 'Folder')}</button>
                         </div>
                       )}
                     </div>
@@ -202,7 +205,7 @@ export function FriendsTab({ friends, unread, dropTarget, localNetwork, onFriend
                   <div className="menu-anchor">
                     <button
                       className="icon-btn"
-                      title="Plus d’options"
+                      title={tr('Plus d’options', 'More options')}
                       onClick={e => {
                         e.stopPropagation();
                         openMenu(f.id, 'more', e.currentTarget);
@@ -216,13 +219,13 @@ export function FriendsTab({ friends, unread, dropTarget, localNetwork, onFriend
                           <button
                             role="menuitemcheckbox"
                             aria-checked={f.autoAccept}
-                            title="Ses fichiers et dossiers arrivent sans vous demander. Les programmes demandent toujours votre accord."
+                            title={tr('Ses fichiers et dossiers arrivent sans vous demander. Les programmes demandent toujours votre accord.', 'Their files and folders arrive without asking you. Programs always ask.')}
                             onClick={async () => { setMenu(null); onFriends(await api.setFriendAutoAccept(f.id, !f.autoAccept)); }}
                           >
                             <span className="menu-check">{f.autoAccept && <Icon name="check" size={14} />}</span>
                             <span>
-                              Accepter ses fichiers automatiquement
-                              <span className="menu-hint">Les programmes demandent toujours.</span>
+                              {tr('Accepter ses fichiers automatiquement', 'Accept their files automatically')}
+                              <span className="menu-hint">{tr('Les programmes demandent toujours.', 'Programs always ask.')}</span>
                             </span>
                           </button>
                         )}
@@ -233,11 +236,11 @@ export function FriendsTab({ friends, unread, dropTarget, localNetwork, onFriend
                             onClick={async () => { setMenu(null); onMuted(await api.setChatMuted('friend', f.id, !mutedFriends.includes(f.id))); }}
                           >
                             <span className="menu-check">{mutedFriends.includes(f.id) && <Icon name="check" size={14} />}</span>
-                            Désactiver les notifications
+                            {tr('Désactiver les notifications', 'Turn off notifications')}
                           </button>
                         )}
-                        <button role="menuitem" onClick={() => { setMenu(null); setRenaming(f); }}><Icon name="edit" size={14} />Renommer</button>
-                        <button role="menuitem" className="danger" onClick={() => { setMenu(null); onRemove(f); }}><Icon name="trash" size={14} />Supprimer</button>
+                        <button role="menuitem" onClick={() => { setMenu(null); setRenaming(f); }}><Icon name="edit" size={14} />{tr('Renommer', 'Rename')}</button>
+                        <button role="menuitem" className="danger" onClick={() => { setMenu(null); onRemove(f); }}><Icon name="trash" size={14} />{tr('Supprimer', 'Remove')}</button>
                       </div>
                     )}
                   </div>
@@ -247,7 +250,7 @@ export function FriendsTab({ friends, unread, dropTarget, localNetwork, onFriend
           })}
         </div>
       )}
-      {query && shown.length === 0 && <div className="setting-sub" style={{ textAlign: 'center' }}>Aucun ami ne correspond.</div>}
+      {query && shown.length === 0 && <div className="setting-sub" style={{ textAlign: 'center' }}>{tr('Aucun ami ne correspond.', 'No friend matches.')}</div>}
 
       {localNetwork && (
         <LocalSendDevices

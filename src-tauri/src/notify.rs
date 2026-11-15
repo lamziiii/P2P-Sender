@@ -72,7 +72,7 @@ pub fn notify(app: &AppHandle, title: &str, body: &str, on_click: impl FnOnce() 
         .show();
 }
 
-#[cfg(not(any(windows, target_os = "android", target_os = "ios")))]
+#[cfg(not(any(windows, target_os = "android")))]
 pub fn notify(app: &AppHandle, title: &str, body: &str, on_click: impl FnOnce() + Send + 'static) {
     use std::sync::atomic::{AtomicUsize, Ordering};
     /// Threads waiting for a click.
@@ -140,9 +140,4 @@ pub fn notify_chat(_app: &AppHandle, title: &str, body: &str, kind: &str, id: &s
     if allowed() {
         crate::android::notify(title, body, Some((kind, id)));
     }
-}
-
-#[cfg(target_os = "ios")]
-pub fn notify(_app: &AppHandle, _title: &str, _body: &str, _on_click: impl FnOnce() + Send + 'static) {
-    let _ = allowed();
 }

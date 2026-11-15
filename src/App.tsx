@@ -1,7 +1,7 @@
 import { useCallback, useState, useEffect, useRef } from 'react';
 import type { ReactNode } from 'react';
 import { api } from './api';
-import type { ChatMessage, Config, DropTarget, Friend, GroupsOverview, InviteLink, OpenChat, Transfer } from './api';
+import type { ChatMessage, Config, DropTarget, Friend, GroupsOverview, InviteLink, OpenChat, Shared, Transfer } from './api';
 import { ChangelogDialog } from './Changelog';
 import { DndButton } from './Dnd';
 import { FINAL, folderErrors, folderSendError, formatBytes, plural, RELAY_HINT, ROUTE_LABELS } from './format';
@@ -9,6 +9,7 @@ import { FriendChatView } from './FriendChat';
 import { FriendsTab } from './FriendsTab';
 import type { Unread } from './FriendsTab';
 import { GroupsTab, GroupView } from './Groups';
+import { lang, locale, tr } from './i18n';
 import { Icon } from './icons';
 import { InviteDialog } from './Invite';
 import { WindowButtons } from './PinButton';
@@ -17,6 +18,7 @@ import { byPlatform, isMobile, useBackButton } from './platform';
 import { useConnection } from './relay';
 import { newsToShow, RELEASES } from './releaseNotes';
 import { SettingsTab } from './SettingsTab';
+import { ShareDialog } from './Share';
 import type { Theme } from './SettingsTab';
 import { TransfersTab } from './TransfersTab';
 import { UpdateBanner } from './Update';
@@ -40,9 +42,9 @@ function TransferStrip({ onOpen }: { onOpen: () => void }) {
   const { count, active, progress, route } = useRunning();
   if (count === 0) return null;
   return (
-    <button className="transfer-strip list-button" title={route === 'relay' ? `Voir les transferts. ${RELAY_HINT}` : 'Voir les transferts'} onClick={onOpen}>
+    <button className="transfer-strip list-button" title={route === 'relay' ? `${tr('Voir les transferts.', 'See the transfers.')} ${RELAY_HINT}` : tr('Voir les transferts', 'See the transfers')} onClick={onOpen}>
       <span>
-        {plural(count, 'transfert en cours', 'transferts en cours')}{active ? ` · ${progress} %` : ''}
+        {plural(count, tr('transfert en cours', 'transfer in progress'), tr('transferts en cours', 'transfers in progress'))}{active ? ` · ${progress} %` : ''}
         {active && route ? ` · ${ROUTE_LABELS[route]}` : ''}
       </span>
       <div className="progress-track"><div className="progress-fill" style={{ width: `${progress}%`, background: 'var(--accent)' }} /></div>
@@ -58,7 +60,9 @@ function RunningBadge() {
 // The removed friend's transfers that would be cancelled.
 function RemovedTransfers({ friendId }: { friendId: string }) {
   const n = useTransfers().filter(t => t.friendId === friendId && !FINAL.has(t.status)).length;
-  return n > 0 ? <> {plural(n, 'transfert en cours sera annulé', 'transferts en cours seront annulés')}.</> : null;
+  return n > 0
+    ? <> {plural(n, tr('transfert en cours sera annulé', 'transfer in progress will be cancelled'), tr('transferts en cours seront annulés', 'transfers in progress will be cancelled'))}.</>
+    : null;
 }
 
 // A chat's last message, as the friend list shows it.
@@ -93,6 +97,9 @@ function App() {
   const [removing, setRemoving] = useState<Friend | null>(null);
   // An invitation link opened (or pasted): asked whether to add whoever made it.
   const [invite, setInvite] = useState<InviteLink | null>(null);
+  // Given to the app from outside ("Envoyer avec P2P Share"): asked where it goes.
+  const [sharing, setSharing] = useState<Shared | null>(null);
+  const closeShare = useCallback(() => setSharing(null), []);
   // Files dragged over the window, and where they would go.
   const [dragging, setDragging] = useState(false);
   const [dropTarget, setDropTarget] = useState<DropTarget | null>(null);
@@ -132,7 +139,7 @@ function App() {
   const friendName = (id: string) => friends.find(f => f.id === id)?.name;
   const senderName = (t: Transfer) => friendName(t.friendId) ?? t.peerName;
   const transferName = useCallback(
-    (t: Transfer) => friends.find(f => f.id === t.friendId)?.name ?? t.peerName ?? 'votre ami',
+    (t: Transfer) => friends.find(f => f.id === t.friendId)?.name ?? t.peerName ?? tr('votre ami', 'your friend'),
     [friends],
   );
   // Paused by hand: with friends only (not LocalSend devices).
@@ -196,6 +203,15 @@ function App() {
 
   const loadFriends = () => { api.getFriends().then(setFriends); };
   const takeInvite = () => { api.takeInviteLink().then(link => { if (link) setInvite(link); }); };
+  // More may come while the dialog is open (one file at a time from the Explorer).
+  const takeShared = () => {
+    api.takeShared().then(shared => {
+      if (!shared) return;
+      setSharing(prev => (prev
+        ? { items: [...prev.items, ...shared.items.filter(i => !prev.items.some(p => p.path === i.path))], text: shared.text ?? prev.text }
+        : shared));
+    });
+  };
 
   // A message came or went: its friend's last message, without asking the
   // whole list again (unless the friend or our ID is not known yet).
@@ -265,35 +281,47 @@ function App() {
     setActiveTab('settings');
   };
 
+  // Files sent, and where to follow them.
+  const sentToast = (sent: number) => tr(
+    `${plural(sent, 'fichier envoyé', 'fichiers envoyés')} : suivez l’envoi dans l’onglet Transferts.`,
+    `${plural(sent, 'file sent', 'files sent')}: follow it in the Transfers tab.`,
+  );
+
   // Files and folders dropped on a friend, a group or a LocalSend device.
   const dropPaths = async (target: DropTarget, paths: string[]) => {
     const inView = viewRef.current.tab !== 'friends' && viewRef.current.tab !== 'groups';
     if (target.kind === 'friend') {
       const { sent, skipped, errors } = await api.sendPaths(target.id, paths);
       if (errors.length > 0) showToast(folderErrors(errors));
-      else if (skipped > 0) showToast(`${plural(skipped, 'élément introuvable ignoré', 'éléments introuvables ignorés')}.`);
+      else if (skipped > 0) showToast(`${plural(skipped, tr('élément introuvable ignoré', 'missing item skipped'), tr('éléments introuvables ignorés', 'missing items skipped'))}.`);
       if (sent === 0) return;
       if (!inView) setActiveTab('transfers');
       // In the chat, only the images show.
       else if (errors.length === 0 && skipped === 0 && !paths.every(path => IMAGE_EXT.test(path))) {
-        showToast(`${plural(sent, 'fichier envoyé', 'fichiers envoyés')} : suivez l’envoi dans l’onglet Transferts.`);
+        showToast(sentToast(sent));
       }
     } else if (target.kind === 'group') {
       const added = await api.addGroupPaths(target.id, paths).catch(() => 0);
       showToast(added > 0
-        ? `${plural(added, 'fichier ajouté', 'fichiers ajoutés')} au dépôt de « ${target.name || 'ce groupe'} ».`
-        : 'Aucun fichier ajouté au groupe.');
+        ? tr(
+          `${plural(added, 'fichier ajouté', 'fichiers ajoutés')} au dépôt de « ${target.name || 'ce groupe'} ».`,
+          `${plural(added, 'file added', 'files added')} to the shared files of “${target.name || 'this group'}”.`,
+        )
+        : tr('Aucun fichier ajouté au groupe.', 'No file added to the group.'));
     } else {
       try {
         const { sent, skipped } = await api.sendPathsToLocalSend(target.id, paths);
         if (skipped > 0) {
           showToast(sent > 0
-            ? `${plural(skipped, 'dossier ignoré', 'dossiers ignorés')} : un appareil LocalSend ne reçoit d’ici que des fichiers.`
-            : 'Un appareil LocalSend ne reçoit d’ici que des fichiers, pas de dossiers.');
+            ? tr(
+              `${plural(skipped, 'dossier ignoré', 'dossiers ignorés')} : un appareil LocalSend ne reçoit d’ici que des fichiers.`,
+              `${plural(skipped, 'folder skipped', 'folders skipped')}: a LocalSend device only gets files from here.`,
+            )
+            : tr('Un appareil LocalSend ne reçoit d’ici que des fichiers, pas de dossiers.', 'A LocalSend device only gets files from here, not folders.'));
         }
         if (sent === 0) return;
         if (!inView) setActiveTab('transfers');
-        else if (skipped === 0) showToast(`${plural(sent, 'fichier envoyé', 'fichiers envoyés')} : suivez l’envoi dans l’onglet Transferts.`);
+        else if (skipped === 0) showToast(sentToast(sent));
       } catch (e) {
         showToast(String(e));
       }
@@ -303,24 +331,66 @@ function App() {
   // Files pasted in a chat: saved, then sent as if dropped there.
   const pasteFiles = async (target: DropTarget, files: File[]) => {
     if (files.some(f => f.size > MAX_PASTE)) {
-      showToast(`Fichier trop gros pour être collé : ${byPlatform('glissez-le dans la discussion', 'envoyez-le avec le trombone')}.`);
+      showToast(tr(
+        `Fichier trop gros pour être collé : ${byPlatform('glissez-le dans la discussion', 'envoyez-le avec le trombone')}.`,
+        `File too big to paste: ${byPlatform('drop it into the chat', 'send it with the paperclip')}.`,
+      ));
       return;
     }
     try {
-      const stamp = new Date().toLocaleString('fr-FR').replace(/\//g, '-').replace(/:/g, '.');
+      const stamp = new Date().toLocaleString(locale).replace(/\//g, '-').replace(/:/g, '.');
       const paths = await Promise.all(files.map(f => {
         // A screenshot comes as "image.png": named after when it was pasted.
         const generic = !f.name || /^image\.\w+$/i.test(f.name);
         const ext = f.name.split('.').pop() || 'png';
-        return api.savePasted(f, generic ? `Image collée ${stamp}.${ext}` : f.name);
+        return api.savePasted(f, generic ? tr(`Image collée ${stamp}.${ext}`, `Pasted image ${stamp}.${ext}`) : f.name);
       }));
       await dropPaths(target, paths);
     } catch {
-      showToast('Impossible d’envoyer ce que vous avez collé.');
+      showToast(tr('Impossible d’envoyer ce que vous avez collé.', 'What you pasted could not be sent.'));
     }
   };
 
+  // A text shared from another app (Android): a message.
+  const sendSharedText = async (target: DropTarget, text: string) => {
+    try {
+      if (target.kind === 'friend') {
+        const res = await api.sendMessage(target.id, text);
+        if ('error' in res) throw new Error(res.error);
+        openChatWith(target.id);
+      } else if (target.kind === 'group') {
+        const res = await api.sendGroupMessage(target.id, text);
+        if ('error' in res) throw new Error(res.error);
+        openGroup(target.id);
+      } else {
+        await api.sendLocalSendText(target.id, text);
+        openLocalSendChat(target.id);
+      }
+    } catch {
+      showToast(tr('Le message n’a pas pu être envoyé.', 'The message could not be sent.'));
+    }
+  };
+
+  // What was shared, sent where the dialog said, as if dropped there.
+  const sendShared = async (target: DropTarget) => {
+    const shared = sharing;
+    setSharing(null);
+    if (!shared) return;
+    if (shared.items.length === 0) {
+      if (shared.text !== undefined) await sendSharedText(target, shared.text);
+      return;
+    }
+    const paths = await api.sharedPaths(shared.items.map(i => i.path), target.kind === 'group').catch(() => []);
+    if (paths.length === 0) {
+      showToast(tr('Impossible de lire ce que vous voulez envoyer.', 'What you want to send could not be read.'));
+      return;
+    }
+    await dropPaths(target, paths);
+  };
+
   useEffect(() => {
+    // The backend writes its own texts in the window's language.
+    api.setLanguage(lang);
     api.getMyId().then(id => {
       myIdRef.current = id;
       setMyId(id);
@@ -416,6 +486,7 @@ function App() {
       api.onFriendsChanged(loadFriends),
       // Asked once listening too: a link that opened the app comes before.
       api.onInviteLink(takeInvite, takeInvite),
+      api.onShared(takeShared, takeShared),
       api.onDragDrop(e => {
         if (e.type === 'leave') {
           setDragging(false);
@@ -445,8 +516,8 @@ function App() {
         setDropTarget(null);
         if (!target) {
           showToast(tab === 'groups'
-            ? 'Déposez les fichiers sur un groupe pour les ajouter à son dépôt.'
-            : 'Déposez les fichiers sur un ami ou un appareil pour les lui envoyer.');
+            ? tr('Déposez les fichiers sur un groupe pour les ajouter à son dépôt.', 'Drop the files on a group to add them to its shared files.')
+            : tr('Déposez les fichiers sur un ami ou un appareil pour les lui envoyer.', 'Drop the files on a friend or a device to send them.'));
           return;
         }
         dropPaths(target, e.paths);
@@ -537,11 +608,13 @@ function App() {
     const many = folder !== undefined || group.length > 1;
     const risky = group.some(t => t.executable);
     const size = formatBytes(folder ? folder.size : group.reduce((n, t) => n + t.fileSize, 0));
-    const who = senderName(first) ?? 'Un ami';
-    const what = folder ? `le dossier « ${folder.name} »` : group.length > 1 ? `${group.length} fichiers` : `« ${first.fileName} »`;
+    const who = senderName(first) ?? tr('Un ami', 'A friend');
+    const what = folder
+      ? tr(`le dossier « ${folder.name} »`, `the folder “${folder.name}”`)
+      : group.length > 1 ? tr(`${group.length} fichiers`, `${group.length} files`) : tr(`« ${first.fileName} »`, `“${first.fileName}”`);
     const fromFriend = !first.peerName && friends.some(f => f.id === first.friendId);
-    const acceptLabel = many ? 'Tout accepter' : 'Accepter';
-    const declineLabel = many ? 'Tout refuser' : 'Refuser';
+    const acceptLabel = many ? tr('Tout accepter', 'Accept all') : tr('Accepter', 'Accept');
+    const declineLabel = many ? tr('Tout refuser', 'Decline all') : tr('Refuser', 'Decline');
     if (compact) {
       return (
         <div key={first.id} className="offer-banner compact">
@@ -549,17 +622,17 @@ function App() {
           <button
             className="item-body list-button offer-line"
             disabled={!fromFriend}
-            title={fromFriend ? 'Ouvrir la discussion' : undefined}
+            title={fromFriend ? tr('Ouvrir la discussion', 'Open the chat') : undefined}
             onClick={() => openChatWith(first.friendId)}
           >
-            <div className="offer-title ellipsis">{who} vous envoie {what}</div>
+            <div className="offer-title ellipsis">{tr(`${who} vous envoie ${what}`, `${who} sends you ${what}`)}</div>
             <div className={`item-sub ellipsis ${risky ? 'danger' : ''}`}>
-              {folder ? `${plural(folder.files, 'fichier', 'fichiers')} · ` : ''}{size}
-              {first.peerName ? ' · LocalSend, non vérifié' : ''}{risky ? ' · peut exécuter du code' : ''}
+              {folder ? `${plural(folder.files, tr('fichier', 'file'), tr('fichiers', 'files'))} · ` : ''}{size}
+              {first.peerName ? tr(' · LocalSend, non vérifié', ' · LocalSend, unverified') : ''}{risky ? tr(' · peut exécuter du code', ' · can run code') : ''}
             </div>
           </button>
-          <button className="btn btn-small" onClick={() => respond(true)}>{folder ? acceptLabel : 'Accepter'}</button>
-          <button className="btn btn-secondary btn-small" onClick={() => respond(false)}>{folder ? declineLabel : 'Refuser'}</button>
+          <button className="btn btn-small" onClick={() => respond(true)}>{folder ? acceptLabel : tr('Accepter', 'Accept')}</button>
+          <button className="btn btn-secondary btn-small" onClick={() => respond(false)}>{folder ? declineLabel : tr('Refuser', 'Decline')}</button>
         </div>
       );
     }
@@ -567,17 +640,22 @@ function App() {
       <div key={first.id} className="offer-banner">
         <div className="file-icon"><Icon name={folder ? 'folder' : 'file'} size={18} /></div>
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div className="offer-title">{folder ? 'Dossier entrant' : group.length > 1 ? `${group.length} fichiers entrants` : 'Fichier entrant'}</div>
+          <div className="offer-title">{folder
+            ? tr('Dossier entrant', 'Incoming folder')
+            : group.length > 1 ? tr(`${group.length} fichiers entrants`, `${group.length} incoming files`) : tr('Fichier entrant', 'Incoming file')}</div>
           <div className="offer-desc">
             {folder
-              ? <><strong>« {folder.name} »</strong> ({plural(folder.files, 'fichier', 'fichiers')}, {size})</>
+              ? <><strong>{tr(`« ${folder.name} »`, `“${folder.name}”`)}</strong> ({plural(folder.files, tr('fichier', 'file'), tr('fichiers', 'files'))}, {size})</>
               : group.length > 1
-                ? <>{group.slice(0, 3).map(t => `« ${t.fileName} »`).join(', ')}{group.length > 3 ? ` et ${group.length - 3} autres` : ''} ({size})</>
-                : <><strong>« {first.fileName} »</strong> ({size})</>}
+                ? <>{group.slice(0, 3).map(t => tr(`« ${t.fileName} »`, `“${t.fileName}”`)).join(', ')}{group.length > 3 ? tr(` et ${group.length - 3} autres`, ` and ${group.length - 3} more`) : ''} ({size})</>
+                : <><strong>{tr(`« ${first.fileName} »`, `“${first.fileName}”`)}</strong> ({size})</>}
           </div>
           {risky && (
             <div className="error-text" style={{ marginBottom: 8 }}>
-              Attention : {folder ? 'ce dossier contient des fichiers qui peuvent' : group.length > 1 ? 'certains fichiers peuvent' : 'ce fichier peut'} exécuter du code{folder ? ', reçus aussi si vous acceptez' : ''}. Ne les ouvrez que si vous attendiez cet envoi.
+              {tr(
+                `Attention : ${folder ? 'ce dossier contient des fichiers qui peuvent' : group.length > 1 ? 'certains fichiers peuvent' : 'ce fichier peut'} exécuter du code${folder ? ', reçus aussi si vous acceptez' : ''}. Ne les ouvrez que si vous attendiez cet envoi.`,
+                `Warning: ${folder ? 'this folder holds files that can' : group.length > 1 ? 'some files can' : 'this file can'} run code${folder ? ', received too if you accept' : ''}. Only open them if you were expecting them.`,
+              )}
             </div>
           )}
           <div style={{ display: 'flex', gap: 8 }}>
@@ -597,7 +675,9 @@ function App() {
       <div className="file-icon"><Icon name="chat" size={16} /></div>
       <div className="item-body">
         <div className="offer-title ellipsis">
-          {u.count > 1 ? `${u.count} nouveaux messages` : 'Nouveau message'} de {friendName(id) ?? 'un ami'}
+          {u.count > 1
+            ? tr(`${u.count} nouveaux messages de ${friendName(id) ?? 'un ami'}`, `${u.count} new messages from ${friendName(id) ?? 'a friend'}`)
+            : tr(`Nouveau message de ${friendName(id) ?? 'un ami'}`, `New message from ${friendName(id) ?? 'a friend'}`)}
         </div>
         <div className="item-sub ellipsis">{u.last}</div>
       </div>
@@ -609,11 +689,13 @@ function App() {
   const transferStrip = <TransferStrip onOpen={() => setActiveTab('transfers')} />;
 
   const dropHint = () => {
-    if (dropTarget?.kind === 'group') return `Déposer pour ajouter au dépôt de « ${dropTarget.name || 'ce groupe'} »`;
-    if (dropTarget) return `Déposer pour envoyer à ${dropTarget.name || 'cet appareil'}`;
+    if (dropTarget?.kind === 'group') {
+      return tr(`Déposer pour ajouter au dépôt de « ${dropTarget.name || 'ce groupe'} »`, `Drop to add to the shared files of “${dropTarget.name || 'this group'}”`);
+    }
+    if (dropTarget) return tr(`Déposer pour envoyer à ${dropTarget.name || 'cet appareil'}`, `Drop to send to ${dropTarget.name || 'this device'}`);
     return activeTab === 'groups'
-      ? 'Déposez les fichiers ou dossiers sur un groupe'
-      : 'Déposez les fichiers ou dossiers sur un ami ou un appareil';
+      ? tr('Déposez les fichiers ou dossiers sur un groupe', 'Drop the files or folders on a group')
+      : tr('Déposez les fichiers ou dossiers sur un ami ou un appareil', 'Drop the files or folders on a friend or a device');
   };
   // Over every view: they are fixed on the window.
   const overlays = (
@@ -622,7 +704,7 @@ function App() {
       {toast && !dragging && <div className="toast">{toast}</div>}
       {news && (
         <ChangelogDialog
-          title={`Nouveautés de la version ${__APP_VERSION__}`}
+          title={tr(`Nouveautés de la version ${__APP_VERSION__}`, `What’s new in version ${__APP_VERSION__}`)}
           releases={RELEASES.filter(r => r.version === __APP_VERSION__)}
           onClose={() => setNews(false)}
         />
@@ -630,14 +712,17 @@ function App() {
       {removing && (
         <div className="modal-backdrop" onClick={() => setRemoving(null)}>
           <div className="modal" role="dialog" aria-modal="true" onClick={e => e.stopPropagation()}>
-            <div className="modal-title">Supprimer {removing.name} ?</div>
+            <div className="modal-title">{tr(`Supprimer ${removing.name} ?`, `Remove ${removing.name}?`)}</div>
             <div className="modal-text">
-              Vous ne pourrez plus discuter ni échanger de fichiers avec cet ami. Pour le retrouver, il faudra vous inviter à nouveau.
+              {tr(
+                'Vous ne pourrez plus discuter ni échanger de fichiers avec cet ami. Pour le retrouver, il faudra vous inviter à nouveau.',
+                'You will no longer chat or exchange files with this friend. To get them back, you will have to invite each other again.',
+              )}
               <RemovedTransfers friendId={removing.id} />
             </div>
             <div style={{ display: 'flex', gap: 8 }}>
-              <button className="btn btn-secondary" style={{ flex: 1 }} autoFocus onClick={() => setRemoving(null)}>Annuler</button>
-              <button className="btn btn-danger" style={{ flex: 1 }} onClick={() => removeFriend(removing.id)}>Supprimer</button>
+              <button className="btn btn-secondary" style={{ flex: 1 }} autoFocus onClick={() => setRemoving(null)}>{tr('Annuler', 'Cancel')}</button>
+              <button className="btn btn-danger" style={{ flex: 1 }} onClick={() => removeFriend(removing.id)}>{tr('Supprimer', 'Remove')}</button>
             </div>
           </div>
         </div>
@@ -650,10 +735,13 @@ function App() {
             if (added) {
               setFriends(added.friends);
               setActiveTab('friends');
-              showToast(`${added.name || 'Votre ami'} est maintenant dans vos amis.`);
+              showToast(tr(`${added.name || 'Votre ami'} est maintenant dans vos amis.`, `${added.name || 'Your friend'} is now your friend.`));
             }
           }}
         />
+      )}
+      {sharing && (
+        <ShareDialog shared={sharing} friends={friends} groups={overview.groups} onPick={sendShared} onClose={closeShare} />
       )}
     </>
   );
@@ -741,19 +829,28 @@ function App() {
   // Relays blocked, friends on the same network may still be online.
   const shown = connection === 'blocked' && friends.some(f => f.online) ? 'local' : connection;
   const status = {
-    online: { label: 'Connecté', className: 'online', hint: '' },
-    connecting: { label: 'Connexion au réseau…', className: '', hint: '' },
+    online: { label: tr('Connecté', 'Connected'), className: 'online', hint: '' },
+    connecting: { label: tr('Connexion au réseau…', 'Connecting…'), className: '', hint: '' },
     local: {
-      label: 'Réseau local uniquement',
+      label: tr('Réseau local uniquement', 'Local network only'),
       className: 'warning',
-      hint: 'Les relais ne répondent pas : seuls vos amis sur le même réseau sont joignables. Ouvrir les réglages réseau.',
+      hint: tr(
+        'Les relais ne répondent pas : seuls vos amis sur le même réseau sont joignables. Ouvrir les réglages réseau.',
+        'The relays do not answer: only your friends on the same network are reachable. Open the network settings.',
+      ),
     },
     blocked: {
-      label: 'Relais injoignables',
+      label: tr('Relais injoignables', 'Relays unreachable'),
       className: 'danger',
       hint: config.localNetwork === false
-        ? 'Les relais ne répondent pas et le réseau local est désactivé : vos amis ne sont pas joignables. Ouvrir les réglages réseau.'
-        : 'Les relais ne répondent pas : vos amis ne sont joignables que sur le même réseau. Ouvrir les réglages réseau.',
+        ? tr(
+          'Les relais ne répondent pas et le réseau local est désactivé : vos amis ne sont pas joignables. Ouvrir les réglages réseau.',
+          'The relays do not answer and the local network is off: your friends are not reachable. Open the network settings.',
+        )
+        : tr(
+          'Les relais ne répondent pas : vos amis ne sont joignables que sur le même réseau. Ouvrir les réglages réseau.',
+          'The relays do not answer: your friends are only reachable on the same network. Open the network settings.',
+        ),
     },
   }[shown];
   return withOverlays(
@@ -779,7 +876,7 @@ function App() {
         </div>
         <div className="header-actions">
           <DndButton until={config.dndUntil ?? 0} onChange={dndUntil => setConfig(c => ({ ...c, dndUntil }))} />
-          <button className={`icon-btn ${tab === 'settings' ? 'active' : ''}`} title="Paramètres" onClick={() => openSettings(false)}><Icon name="settings" /></button>
+          <button className={`icon-btn ${tab === 'settings' ? 'active' : ''}`} title={tr('Paramètres', 'Settings')} onClick={() => openSettings(false)}><Icon name="settings" /></button>
           <WindowButtons />
         </div>
       </div>
@@ -789,13 +886,13 @@ function App() {
       {tab !== 'settings' && (
         <div className="pivot">
           <button className={`pivot-btn ${tab === 'friends' ? 'active' : ''}`} onClick={() => setActiveTab('friends')}>
-            Amis{friendBadge > 0 && <span className="badge">{friendBadge}</span>}
+            {tr('Amis', 'Friends')}{friendBadge > 0 && <span className="badge">{friendBadge}</span>}
           </button>
           <button className={`pivot-btn ${tab === 'groups' ? 'active' : ''}`} onClick={() => setActiveTab('groups')}>
-            Groupes{groupBadge > 0 && <span className="badge">{groupBadge}</span>}
+            {tr('Groupes', 'Groups')}{groupBadge > 0 && <span className="badge">{groupBadge}</span>}
           </button>
           <button className={`pivot-btn ${tab === 'transfers' ? 'active' : ''}`} onClick={() => setActiveTab('transfers')}>
-            Transferts<RunningBadge />
+            {tr('Transferts', 'Transfers')}<RunningBadge />
           </button>
         </div>
       )}

@@ -280,13 +280,7 @@ fn candidates(advertised: &[Ipv4Addr], direct: &[IpAddr], nets: &Nets) -> Vec<Ip
 fn tune(tcp: &TcpStream) {
     let _ = tcp.set_nodelay(true);
     let keepalive = socket2::TcpKeepalive::new().with_time(KEEPALIVE_TIME);
-    #[cfg(any(
-        windows,
-        target_os = "linux",
-        target_os = "android",
-        target_os = "macos",
-        target_os = "ios"
-    ))]
+    #[cfg(any(windows, target_os = "linux", target_os = "android", target_os = "macos"))]
     let keepalive = keepalive
         .with_interval(KEEPALIVE_INTERVAL)
         .with_retries(KEEPALIVE_RETRIES);

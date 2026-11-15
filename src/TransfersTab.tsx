@@ -2,6 +2,7 @@ import { memo, useState } from 'react';
 import { api } from './api';
 import type { Transfer } from './api';
 import { ACTIVE, FINAL, formatBytes, plural, RELAY_HINT, ROUTE_LABELS } from './format';
+import { tr } from './i18n';
 import { Icon } from './icons';
 import { byPlatform } from './platform';
 import { useTransfers } from './transferStore';
@@ -24,21 +25,32 @@ const color = (status: string) => {
   return 'var(--text-secondary)';
 };
 
+const PAUSED_BY_PEER = () => tr('Mis en pause par le contact', 'Paused by the other side');
+
 // The status, and what happens next when it is waiting.
 const describe = (t: Transfer, who: string): { label: string; hint?: string } => {
   switch (t.status) {
-    case 'completed': return { label: t.dir === 'in' ? 'Reçu' : 'Envoyé' };
-    case 'declined': return { label: 'Refusé', hint: t.dir === 'out' ? `${who} n’a pas accepté ce fichier.` : undefined };
-    case 'cancelled': return { label: 'Annulé' };
-    case 'error': return { label: 'Échec' };
-    case 'pending': return { label: 'En file d’attente' };
-    case 'connecting': return { label: 'En attente', hint: `L’envoi partira dès que ${who} sera en ligne.` };
-    case 'waiting_consent': return { label: 'En attente', hint: `${who} doit accepter le fichier.` };
+    case 'completed': return { label: t.dir === 'in' ? tr('Reçu', 'Received') : tr('Envoyé', 'Sent') };
+    case 'declined': return {
+      label: tr('Refusé', 'Declined'),
+      hint: t.dir === 'out' ? tr(`${who} n’a pas accepté ce fichier.`, `${who} did not accept this file.`) : undefined,
+    };
+    case 'cancelled': return { label: tr('Annulé', 'Cancelled') };
+    case 'error': return { label: tr('Échec', 'Failed') };
+    case 'pending': return { label: tr('En file d’attente', 'Queued') };
+    case 'connecting': return {
+      label: tr('En attente', 'Waiting'),
+      hint: tr(`L’envoi partira dès que ${who} sera en ligne.`, `It will be sent as soon as ${who} is online.`),
+    };
+    case 'waiting_consent': return { label: tr('En attente', 'Waiting'), hint: tr(`${who} doit accepter le fichier.`, `${who} must accept the file.`) };
     case 'paused':
-      if (t.pausedBy === 'me') return { label: 'En pause' };
-      if (t.pausedBy === 'peer') return { label: 'Mis en pause par le contact' };
-      return { label: 'En pause', hint: `Connexion perdue : reprise automatique dès que ${who} revient.` };
-    case 'finishing': return { label: 'Finalisation…' };
+      if (t.pausedBy === 'me') return { label: tr('En pause', 'Paused') };
+      if (t.pausedBy === 'peer') return { label: PAUSED_BY_PEER() };
+      return {
+        label: tr('En pause', 'Paused'),
+        hint: tr(`Connexion perdue : reprise automatique dès que ${who} revient.`, `Connection lost: it resumes by itself when ${who} is back.`),
+      };
+    case 'finishing': return { label: tr('Finalisation…', 'Finishing…') };
     default: return { label: `${t.progress} %` };
   }
 };
@@ -77,7 +89,7 @@ const TransferRow = memo(function TransferRow({ t, who, pausable, label }: {
       <div className="item-body">
         <div className="transfer-header">
           {openable
-            ? <button className="item-title transfer-name link-title" title={`Ouvrir ${name}`} onClick={() => api.openTransfer(t.id)}>{name}</button>
+            ? <button className="item-title transfer-name link-title" title={tr(`Ouvrir ${name}`, `Open ${name}`)} onClick={() => api.openTransfer(t.id)}>{name}</button>
             : <span className="item-title transfer-name" title={name}>{name}</span>}
           <span className="transfer-status" style={{ color: color(t.status) }}>{state}</span>
         </div>
@@ -99,21 +111,21 @@ const TransferRow = memo(function TransferRow({ t, who, pausable, label }: {
         {hint && FINAL.has(t.status) && <div className="error-text">{hint}</div>}
         {t.error && <div className="error-text" style={{ marginTop: 4 }}>{t.error}</div>}
         {t.status === 'completed' && t.dir === 'in' && t.executable && (
-          <div className="item-sub">Ce fichier peut exécuter du code : ouvrez-le depuis son dossier si vous l’attendiez.</div>
+          <div className="item-sub">{tr('Ce fichier peut exécuter du code : ouvrez-le depuis son dossier si vous l’attendiez.', 'This file can run code: open it from its folder if you were expecting it.')}</div>
         )}
         {(!FINAL.has(t.status) || (t.status === 'completed' && t.dir === 'in')) && (
           <div className="row-actions">
             {t.status === 'completed' && t.dir === 'in' && (
-              <button className="btn btn-secondary btn-small" onClick={() => api.showInFolder(t.id)}><Icon name="folder" size={14} />Afficher dans le dossier</button>
+              <button className="btn btn-secondary btn-small" onClick={() => api.showInFolder(t.id)}><Icon name="folder" size={14} />{tr('Afficher dans le dossier', 'Show in folder')}</button>
             )}
             {pausable && canPause(t) && (
-              <button className="btn btn-secondary btn-small" onClick={() => api.pauseTransfer(t.id)}><Icon name="pause" size={14} />Pause</button>
+              <button className="btn btn-secondary btn-small" onClick={() => api.pauseTransfer(t.id)}><Icon name="pause" size={14} />{tr('Pause', 'Pause')}</button>
             )}
             {pausable && canResume(t) && (
-              <button className="btn btn-secondary btn-small" onClick={() => api.resumeTransfer(t.id)}><Icon name="play" size={14} />Reprendre</button>
+              <button className="btn btn-secondary btn-small" onClick={() => api.resumeTransfer(t.id)}><Icon name="play" size={14} />{tr('Reprendre', 'Resume')}</button>
             )}
             {!FINAL.has(t.status) && (
-              <button className="btn btn-secondary btn-small" onClick={() => api.cancelTransfer(t.id)}>Annuler</button>
+              <button className="btn btn-secondary btn-small" onClick={() => api.cancelTransfer(t.id)}>{tr('Annuler', 'Cancel')}</button>
             )}
           </div>
         )}
@@ -121,6 +133,12 @@ const TransferRow = memo(function TransferRow({ t, who, pausable, label }: {
     </div>
   );
 });
+
+// Some files of a group failed.
+const failedText = (done: number, failed: number, out: boolean) => tr(
+  `${done} ${out ? 'envoyés' : 'reçus'} · ${failed} en échec`,
+  `${done} ${out ? 'sent' : 'received'} · ${failed} failed`,
+);
 
 const sameList = (a: Transfer[], b: Transfer[]) => a.length === b.length && a.every((t, i) => t === b[i]);
 
@@ -145,21 +163,23 @@ const TransferGroup = memo(function TransferGroup({ list, who, running, pausable
         <div className="file-icon"><Icon name={out ? 'up' : 'down'} size={18} /></div>
         <div className="item-body">
           <div className="transfer-header">
-            <span className="item-title">{list.length} fichiers {out ? `à ${who}` : `de ${who}`}</span>
+            <span className="item-title">{out ? tr(`${list.length} fichiers à ${who}`, `${list.length} files to ${who}`) : tr(`${list.length} fichiers de ${who}`, `${list.length} files from ${who}`)}</span>
             <Icon name={open ? 'chevronDown' : 'chevronRight'} size={14} />
           </div>
           {running && <Progress value={progress} status="sending" />}
           <div className="transfer-meta">
             <span>{formatBytes(size)}{running ? ` · ${progress} %` : ''}</span>
             <span style={{ color: color(status) }}>
-              {running ? `${done}/${list.length} terminés` : failed > 0 ? `${done} ${out ? 'envoyés' : 'reçus'} · ${failed} en échec` : out ? 'Tous envoyés' : 'Tous reçus'}
+              {running
+                ? tr(`${done}/${list.length} terminés`, `${done}/${list.length} done`)
+                : failed > 0 ? failedText(done, failed, out) : out ? tr('Tous envoyés', 'All sent') : tr('Tous reçus', 'All received')}
             </span>
           </div>
         </div>
       </button>
       {running && (
         <div className="row-actions">
-          <button className="btn btn-secondary btn-small" onClick={() => list.filter(t => !FINAL.has(t.status)).forEach(t => api.cancelTransfer(t.id))}>Tout annuler</button>
+          <button className="btn btn-secondary btn-small" onClick={() => list.filter(t => !FINAL.has(t.status)).forEach(t => api.cancelTransfer(t.id))}>{tr('Tout annuler', 'Cancel all')}</button>
         </div>
       )}
       {open && <div className="list nested">{list.map(t => <TransferRow key={t.id} t={t} who={who} pausable={pausable} />)}</div>}
@@ -203,11 +223,11 @@ const FolderGroup = memo(function FolderGroup({ list, who, running, pausable }: 
           </div>
           {running && <Progress value={progress} status="sending" />}
           <div className="transfer-meta">
-            <span className="ellipsis">{plural(folder.files, 'fichier', 'fichiers')} · {formatBytes(size)} · {out ? `à ${who}` : `de ${who}`}</span>
+            <span className="ellipsis">{plural(folder.files, tr('fichier', 'file'), tr('fichiers', 'files'))} · {formatBytes(size)} · {out ? tr(`à ${who}`, `to ${who}`) : tr(`de ${who}`, `from ${who}`)}</span>
             <span style={{ color: color(status), whiteSpace: 'nowrap' }}>
-              {pausedByPeer ? 'Mis en pause par le contact'
+              {pausedByPeer ? PAUSED_BY_PEER()
                 : running ? `${done}/${list.length} · ${progress} %`
-                  : failed > 0 ? `${done} ${out ? 'envoyés' : 'reçus'} · ${failed} en échec` : out ? 'Envoyé' : 'Reçu'}
+                  : failed > 0 ? failedText(done, failed, out) : out ? tr('Envoyé', 'Sent') : tr('Reçu', 'Received')}
             </span>
           </div>
         </div>
@@ -215,16 +235,16 @@ const FolderGroup = memo(function FolderGroup({ list, who, running, pausable }: 
       {(running || shown) && (
         <div className="row-actions">
           {shown && (
-            <button className="btn btn-secondary btn-small" onClick={() => api.showInFolder(shown.id)}><Icon name="folder" size={14} />Afficher le dossier</button>
+            <button className="btn btn-secondary btn-small" onClick={() => api.showInFolder(shown.id)}><Icon name="folder" size={14} />{tr('Afficher le dossier', 'Show the folder')}</button>
           )}
           {resumes.length > 0 && (
-            <button className="btn btn-secondary btn-small" onClick={() => resumes.forEach(t => api.resumeTransfer(t.id))}><Icon name="play" size={14} />Reprendre</button>
+            <button className="btn btn-secondary btn-small" onClick={() => resumes.forEach(t => api.resumeTransfer(t.id))}><Icon name="play" size={14} />{tr('Reprendre', 'Resume')}</button>
           )}
           {resumes.length === 0 && pauses.length > 0 && (
-            <button className="btn btn-secondary btn-small" onClick={() => pauses.forEach(t => api.pauseTransfer(t.id))}><Icon name="pause" size={14} />Pause</button>
+            <button className="btn btn-secondary btn-small" onClick={() => pauses.forEach(t => api.pauseTransfer(t.id))}><Icon name="pause" size={14} />{tr('Pause', 'Pause')}</button>
           )}
           {running && (
-            <button className="btn btn-secondary btn-small" onClick={() => list.filter(t => !FINAL.has(t.status)).forEach(t => api.cancelTransfer(t.id))}>Tout annuler</button>
+            <button className="btn btn-secondary btn-small" onClick={() => list.filter(t => !FINAL.has(t.status)).forEach(t => api.cancelTransfer(t.id))}>{tr('Tout annuler', 'Cancel all')}</button>
           )}
         </div>
       )}
@@ -283,8 +303,8 @@ export function TransfersTab({ nameOf, pausable, onClear }: {
       <div className="empty-state">
         <Icon name="transfers" size={32} />
         {byPlatform(
-          'Aucun transfert. Glissez un fichier ou un dossier sur un ami pour le lui envoyer.',
-          'Aucun transfert. Touchez l’icône d’envoi à côté d’un ami pour lui envoyer un fichier.',
+          tr('Aucun transfert. Glissez un fichier ou un dossier sur un ami pour le lui envoyer.', 'No transfers. Drop a file or a folder on a friend to send it to them.'),
+          tr('Aucun transfert. Touchez l’icône d’envoi à côté d’un ami pour lui envoyer un fichier.', 'No transfers. Tap the send icon next to a friend to send them a file.'),
         )}
       </div>
     );
@@ -293,18 +313,18 @@ export function TransfersTab({ nameOf, pausable, onClear }: {
     <>
       {running.length > 0 && (
         <>
-          <div className="section-header">En cours ({running.length})</div>
+          <div className="section-header">{tr('En cours', 'In progress')} ({running.length})</div>
           {section(running, true)}
         </>
       )}
       {finished.length > 0 && (
         <>
           <div className="section-header section-header-row" style={{ marginTop: running.length > 0 ? 6 : 0 }}>
-            <span>Terminés ({finished.length})</span>
-            <button className="btn-link" onClick={onClear}>Effacer</button>
+            <span>{tr('Terminés', 'Finished')} ({finished.length})</span>
+            <button className="btn-link" onClick={onClear}>{tr('Effacer', 'Clear')}</button>
           </div>
           {section(finished, false)}
-          <div className="setting-sub" style={{ textAlign: 'center' }}>Les transferts terminés disparaissent d’eux-mêmes au bout d’un jour.</div>
+          <div className="setting-sub" style={{ textAlign: 'center' }}>{tr('Les transferts terminés disparaissent d’eux-mêmes au bout d’un jour.', 'Finished transfers go away by themselves after a day.')}</div>
         </>
       )}
     </>

@@ -4,6 +4,7 @@ import type { Friend, GroupDetail, GroupFile, GroupMember, GroupMessage, GroupPi
 import { BubbleActions, ChatInput } from './chatParts';
 import { chatRows } from './chatRows';
 import { avatarColor, formatBytes, formatDate, formatTime, initial } from './format';
+import { tr } from './i18n';
 import { Icon } from './icons';
 import { WindowButtons } from './PinButton';
 import { isMobile, useLongPress } from './platform';
@@ -18,20 +19,38 @@ const MAX_SUGGESTIONS = 6;
 // What mentions everyone (the backend's words).
 const EVERYONE = ['tous', 'all'];
 
-const GROUP_ERRORS: Record<string, string> = {
+const GROUP_ERRORS: Record<string, string> = tr({
   no_name: 'Donnez un nom au groupe.',
   too_many: `Un groupe compte au plus ${MAX_MEMBERS} membres.`,
   not_member: 'Vous ne faites plus partie de ce groupe.',
   too_long: 'Message trop long (5000 caractères max).',
   syncing: 'Synchronisation avec les membres en cours, réessayez dans un instant.',
-};
+}, {
+  no_name: 'Give the group a name.',
+  too_many: `A group has at most ${MAX_MEMBERS} members.`,
+  not_member: 'You are no longer a member of this group.',
+  too_long: 'Message too long (5,000 characters max).',
+  syncing: 'Syncing with the members, try again in a moment.',
+});
 
 const PIN_ERRORS: Record<string, string> = {
   ...GROUP_ERRORS,
-  too_many: 'Au plus 50 éléments épinglés : désépinglez-en un d’abord.',
-  unknown: 'Cet élément n’existe plus.',
-  not_sent: 'Ce message n’est pas encore parti chez les membres.',
+  ...tr({
+    too_many: 'Au plus 50 éléments épinglés : désépinglez-en un d’abord.',
+    unknown: 'Cet élément n’existe plus.',
+    not_sent: 'Ce message n’est pas encore parti chez les membres.',
+  }, {
+    too_many: 'At most 50 pinned items: unpin one first.',
+    unknown: 'This item no longer exists.',
+    not_sent: 'This message has not reached the members yet.',
+  }),
 };
+
+// How many members, and how many online.
+const membersOnline = (members: number, online: number) => tr(
+  `${members} membres · ${online} en ligne`,
+  `${members} members · ${online} online`,
+);
 
 /* ─── Friend picker ─── */
 
@@ -41,7 +60,7 @@ function FriendPicker({ friends, selected, onChange }: {
   onChange: (ids: string[]) => void;
 }) {
   if (friends.length === 0) {
-    return <div className="setting-sub">Aucun ami à ajouter.</div>;
+    return <div className="setting-sub">{tr('Aucun ami à ajouter.', 'No friend to add.')}</div>;
   }
   const toggle = (id: string) =>
     onChange(selected.includes(id) ? selected.filter(x => x !== id) : [...selected, id]);
@@ -79,13 +98,15 @@ export function GroupsTab({ overview, friends, dropTarget, onOpen }: {
     setError('');
     api.respondToGroupInvite(gid, accept)
       .then(() => { if (accept) onOpen(gid); })
-      .catch(() => setError(accept ? 'Impossible de rejoindre le groupe.' : 'Impossible de refuser l’invitation.'));
+      .catch(() => setError(accept
+        ? tr('Impossible de rejoindre le groupe.', 'Could not join the group.')
+        : tr('Impossible de refuser l’invitation.', 'Could not decline the invitation.')));
   };
 
   const create = async () => {
     const res = await api.createGroup(name, members);
     if ('error' in res) {
-      setError(GROUP_ERRORS[res.error] ?? 'Impossible de créer le groupe.');
+      setError(GROUP_ERRORS[res.error] ?? tr('Impossible de créer le groupe.', 'Could not create the group.'));
       return;
     }
     setCreating(false);
@@ -103,11 +124,14 @@ export function GroupsTab({ overview, friends, dropTarget, onOpen }: {
           <div style={{ flex: 1, minWidth: 0 }}>
             <div className="offer-title">Invitation</div>
             <div className="offer-desc">
-              <strong>{inv.fromName}</strong> vous invite dans <strong>« {inv.name || 'Groupe'} »</strong>
+              {tr(
+                <><strong>{inv.fromName}</strong> vous invite dans <strong>« {inv.name || 'Groupe'} »</strong></>,
+                <><strong>{inv.fromName}</strong> invites you to <strong>“{inv.name || 'Group'}”</strong></>,
+              )}
             </div>
             <div style={{ display: 'flex', gap: 8 }}>
-              <button className="btn" style={{ flex: 1 }} onClick={() => respond(inv.gid, true)}>Rejoindre</button>
-              <button className="btn btn-secondary" style={{ flex: 1 }} onClick={() => respond(inv.gid, false)}>Refuser</button>
+              <button className="btn" style={{ flex: 1 }} onClick={() => respond(inv.gid, true)}>{tr('Rejoindre', 'Join')}</button>
+              <button className="btn btn-secondary" style={{ flex: 1 }} onClick={() => respond(inv.gid, false)}>{tr('Refuser', 'Decline')}</button>
             </div>
           </div>
         </div>
@@ -131,18 +155,18 @@ export function GroupsTab({ overview, friends, dropTarget, onOpen }: {
                 <div className="transfer-header" style={{ marginBottom: 0 }}>
                   <span className="item-title title-with-icon">
                     <span className="ellipsis">{g.name}</span>
-                    {g.muted && <span className="muted-icon" title="Notifications désactivées"><Icon name="bellOff" size={12} /></span>}
+                    {g.muted && <span className="muted-icon" title={tr('Notifications désactivées', 'Notifications off')}><Icon name="bellOff" size={12} /></span>}
                   </span>
                   {g.lastTs > 0 && <span className="item-time">{formatDate(g.lastTs)}</span>}
                 </div>
                 <div className="transfer-header" style={{ marginBottom: 0 }}>
                   <span className={`item-sub ellipsis ${g.removed ? 'danger' : ''}`}>
-                    {g.removed ? 'Vous avez été retiré'
-                      : g.syncing ? 'Synchronisation…'
-                        : g.lastMessage ?? `${g.members} membres · ${g.online} en ligne`}
+                    {g.removed ? tr('Vous avez été retiré', 'You were removed')
+                      : g.syncing ? tr('Synchronisation…', 'Syncing…')
+                        : g.lastMessage ?? membersOnline(g.members, g.online)}
                   </span>
                   <span className="badges">
-                    {g.unreadMentions > 0 && <span className="badge" title="Vous êtes mentionné">@</span>}
+                    {g.unreadMentions > 0 && <span className="badge" title={tr('Vous êtes mentionné', 'You are mentioned')}>@</span>}
                     {g.unread > 0 && <span className={`badge ${g.muted ? 'muted' : ''}`}>{g.unread}</span>}
                   </span>
                 </div>
@@ -154,29 +178,29 @@ export function GroupsTab({ overview, friends, dropTarget, onOpen }: {
       {overview.groups.length === 0 && overview.invites.length === 0 && !creating && (
         <div className="empty-state">
           <Icon name="users" size={32} />
-          Aucun groupe. Créez-en un avec vos amis.
+          {tr('Aucun groupe. Créez-en un avec vos amis.', 'No groups. Create one with your friends.')}
         </div>
       )}
 
       {!creating ? (
         <button className="btn" style={{ width: '100%', marginTop: 6 }} disabled={available.length === 0} onClick={() => { setCreating(true); setError(''); }}>
-          <Icon name="plus" size={14} />Créer un groupe
+          <Icon name="plus" size={14} />{tr('Créer un groupe', 'Create a group')}
         </button>
       ) : (
         <div className="card stack">
-          <div className="card-label" style={{ marginBottom: 0 }}>Nouveau groupe</div>
-          <input className="input" placeholder="Nom du groupe" maxLength={60} value={name} onChange={e => { setName(e.target.value); setError(''); }} />
-          <div className="setting-sub">Inviter des amis</div>
+          <div className="card-label" style={{ marginBottom: 0 }}>{tr('Nouveau groupe', 'New group')}</div>
+          <input className="input" placeholder={tr('Nom du groupe', 'Group name')} maxLength={60} value={name} onChange={e => { setName(e.target.value); setError(''); }} />
+          <div className="setting-sub">{tr('Inviter des amis', 'Invite friends')}</div>
           <FriendPicker friends={available} selected={members} onChange={setMembers} />
           {error && <div className="error-text">{error}</div>}
           <div style={{ display: 'flex', gap: 8 }}>
-            <button className="btn" style={{ flex: 1 }} disabled={!name.trim()} onClick={create}>Créer</button>
-            <button className="btn btn-secondary" style={{ flex: 1 }} onClick={() => { setCreating(false); setError(''); }}>Annuler</button>
+            <button className="btn" style={{ flex: 1 }} disabled={!name.trim()} onClick={create}>{tr('Créer', 'Create')}</button>
+            <button className="btn btn-secondary" style={{ flex: 1 }} onClick={() => { setCreating(false); setError(''); }}>{tr('Annuler', 'Cancel')}</button>
           </div>
         </div>
       )}
       {available.length === 0 && (
-        <div className="setting-sub" style={{ textAlign: 'center' }}>Ajoutez d’abord des amis pour créer un groupe.</div>
+        <div className="setting-sub" style={{ textAlign: 'center' }}>{tr('Ajoutez d’abord des amis pour créer un groupe.', 'Add friends first to create a group.')}</div>
       )}
     </>
   );
@@ -205,11 +229,13 @@ const GroupBubble = memo(function GroupBubble({ m, cont, last, mentions, onPin }
           <RichText text={m.text} mentions={mentions} />
           {(last || m.pinned || (m.mine && m.receivedBy < m.total)) && (
             <div className="bubble-time">
-              {m.pinned && <span className="pinned-mark" title="Épinglé"><Icon name="pin" size={10} /></span>}
+              {m.pinned && <span className="pinned-mark" title={tr('Épinglé', 'Pinned')}><Icon name="pin" size={10} /></span>}
               {formatTime(m.ts)}
               {m.mine && m.total > 0 && (
-                <span title="Membres qui ont reçu le message">
-                  {m.receivedBy >= m.total ? ' · ✓✓ Reçu par tous' : ` · Reçu par ${m.receivedBy}/${m.total}`}
+                <span title={tr('Membres qui ont reçu le message', 'Members who received the message')}>
+                  {m.receivedBy >= m.total
+                    ? tr(' · ✓✓ Reçu par tous', ' · ✓✓ Received by all')
+                    : tr(` · Reçu par ${m.receivedBy}/${m.total}`, ` · Received by ${m.receivedBy}/${m.total}`)}
                 </span>
               )}
             </div>
@@ -217,12 +243,12 @@ const GroupBubble = memo(function GroupBubble({ m, cont, last, mentions, onPin }
         </div>
       </div>
       <BubbleActions open={open}>
-        <button className="icon-btn small" title={m.pinned ? 'Désépingler' : 'Épingler'} onClick={() => onPin(m.id, m.pinned)}>
+        <button className="icon-btn small" title={m.pinned ? tr('Désépingler', 'Unpin') : tr('Épingler', 'Pin')} onClick={() => onPin(m.id, m.pinned)}>
           <Icon name="pin" size={14} />
         </button>
         {/* The text cannot be selected by touch: copied whole. */}
         {isMobile && (
-          <button className="icon-btn small" title="Copier" onClick={() => navigator.clipboard.writeText(m.text)}><Icon name="copy" size={14} /></button>
+          <button className="icon-btn small" title={tr('Copier', 'Copy')} onClick={() => navigator.clipboard.writeText(m.text)}><Icon name="copy" size={14} /></button>
         )}
       </BubbleActions>
     </div>
@@ -237,14 +263,14 @@ function PinBar({ pins, onOpen, onUnpin }: {
 }) {
   const [open, setOpen] = useState(false);
   const [latest] = pins;
-  const what = (p: GroupPin) => (p.kind === 'file' ? `Fichier « ${p.text} »` : p.text);
+  const what = (p: GroupPin) => (p.kind === 'file' ? tr(`Fichier « ${p.text} »`, `File “${p.text}”`) : p.text);
   return (
     <div className="pin-bar">
       <button className="pin-head list-button" aria-expanded={open} onClick={() => setOpen(!open)}>
         <Icon name="pin" size={14} />
         <div className="item-body">
-          <div className="pin-title">{pins.length > 1 ? `${pins.length} éléments épinglés` : 'Épinglé'}</div>
-          <div className="item-sub ellipsis">{latest.authorName} : {what(latest)}</div>
+          <div className="pin-title">{pins.length > 1 ? tr(`${pins.length} éléments épinglés`, `${pins.length} pinned items`) : tr('Épinglé', 'Pinned')}</div>
+          <div className="item-sub ellipsis">{latest.authorName}{tr(' : ', ': ')}{what(latest)}</div>
         </div>
         <Icon name={open ? 'chevronUp' : 'chevronDown'} size={14} />
       </button>
@@ -252,11 +278,11 @@ function PinBar({ pins, onOpen, onUnpin }: {
         <div className="pin-list">
           {pins.map(p => (
             <div key={p.target} className="pin-item">
-              <button className="list-button item-body" title={p.kind === 'file' ? 'Voir dans les fichiers' : 'Voir le message'} onClick={() => { setOpen(false); onOpen(p); }}>
+              <button className="list-button item-body" title={p.kind === 'file' ? tr('Voir dans les fichiers', 'See in the files') : tr('Voir le message', 'See the message')} onClick={() => { setOpen(false); onOpen(p); }}>
                 <div className="ellipsis">{what(p)}</div>
-                <div className="item-sub ellipsis">{p.authorName} · {formatDate(p.ts)} · épinglé par {p.pinnedByName}</div>
+                <div className="item-sub ellipsis">{p.authorName} · {formatDate(p.ts)} · {tr(`épinglé par ${p.pinnedByName}`, `pinned by ${p.pinnedByName}`)}</div>
               </button>
-              <button className="icon-btn small" title="Désépingler" onClick={() => onUnpin(p.target)}><Icon name="close" size={14} /></button>
+              <button className="icon-btn small" title={tr('Désépingler', 'Unpin')} onClick={() => onUnpin(p.target)}><Icon name="close" size={14} /></button>
             </div>
           ))}
         </div>
@@ -272,7 +298,7 @@ const suggestions = (members: GroupMember[], query: string): Suggestion[] => {
   const q = query.toLowerCase();
   const all = [
     ...members.filter(m => !m.me).map(m => ({ id: m.id, name: m.name, handle: m.handle })),
-    { id: '', name: 'Tout le monde', handle: 'tous' },
+    { id: '', name: tr('Tout le monde', 'Everyone'), handle: tr('tous', 'all') },
   ];
   return all
     .filter(s => s.handle.toLowerCase().startsWith(q) || s.name.toLowerCase().includes(q))
@@ -388,7 +414,7 @@ export function GroupView({ gid, friends, notice, dropping, onPasteFiles, onChan
       const res = await api.sendGroupMessage(gid, text);
       if ('error' in res) {
         setInput(text);
-        flash(GROUP_ERRORS[res.error] ?? 'Message non envoyé.');
+        flash(GROUP_ERRORS[res.error] ?? tr('Message non envoyé.', 'Message not sent.'));
       }
     } finally {
       sendingRef.current = false;
@@ -400,7 +426,7 @@ export function GroupView({ gid, friends, notice, dropping, onPasteFiles, onChan
     try {
       await api.addGroupFiles(gid);
     } catch {
-      flash('Impossible d’ajouter ces fichiers.');
+      flash(tr('Impossible d’ajouter ces fichiers.', 'Could not add these files.'));
     } finally {
       setAdding(false);
     }
@@ -414,7 +440,7 @@ export function GroupView({ gid, friends, notice, dropping, onPasteFiles, onChan
 
   const togglePin = useCallback(async (target: string, pinned: boolean) => {
     const res = await (pinned ? api.unpinGroupItem(gid, target) : api.pinGroupItem(gid, target));
-    if ('error' in res) flash(PIN_ERRORS[res.error] ?? 'Impossible d’épingler.');
+    if ('error' in res) flash(PIN_ERRORS[res.error] ?? tr('Impossible d’épingler.', 'Could not pin.'));
     refresh();
   }, [gid, flash, refresh]);
 
@@ -422,7 +448,7 @@ export function GroupView({ gid, friends, notice, dropping, onPasteFiles, onChan
     // The file list or the chat must be shown before the item is found.
     setPane(pin.kind === 'file' ? 'files' : 'chat');
     requestAnimationFrame(() => {
-      if (!jumpTo(pin.target) && pin.kind === 'message') flash('Ce message n’est plus dans l’historique.');
+      if (!jumpTo(pin.target) && pin.kind === 'message') flash(tr('Ce message n’est plus dans l’historique.', 'This message is no longer in the history.'));
     });
   };
 
@@ -467,7 +493,7 @@ export function GroupView({ gid, friends, notice, dropping, onPasteFiles, onChan
     });
   };
 
-  const name = detail?.name ?? 'Groupe';
+  const name = detail?.name ?? tr('Groupe', 'Group');
   const online = members.filter(m => m.online && !m.me).length;
   const inactive = !detail || detail.removed || detail.syncing;
   const pins = detail?.pins ?? [];
@@ -476,29 +502,29 @@ export function GroupView({ gid, friends, notice, dropping, onPasteFiles, onChan
     <div className={`app ${dropping && !inactive ? 'dropping' : ''}`}>
       <div className="header">
         <div className="brand">
-          <button className="icon-btn" title="Retour" onClick={onBack}><Icon name="back" /></button>
+          <button className="icon-btn" title={tr('Retour', 'Back')} onClick={onBack}><Icon name="back" /></button>
           <div className="avatar small group" style={{ background: avatarColor(gid), color: '#fff' }}>{initial(name)}</div>
           <div className="header-title">
             <div className="title title-with-icon">
               <span className="ellipsis">{name}</span>
-              {detail?.muted && <span className="muted-icon" title="Notifications désactivées, sauf les mentions"><Icon name="bellOff" size={12} /></span>}
+              {detail?.muted && <span className="muted-icon" title={tr('Notifications désactivées, sauf les mentions', 'Notifications off, except mentions')}><Icon name="bellOff" size={12} /></span>}
             </div>
             <div className={`subtitle ${online > 0 ? 'online' : ''}`}>
-              {detail?.syncing ? 'Synchronisation…' : `${members.length} membres · ${online} en ligne`}
+              {detail?.syncing ? tr('Synchronisation…', 'Syncing…') : membersOnline(members.length, online)}
             </div>
           </div>
         </div>
         <div className="header-actions">
-          <button className={`icon-btn ${pane === 'settings' ? 'active' : ''}`} title="Membres et réglages" onClick={() => setPane(pane === 'settings' ? 'chat' : 'settings')}><Icon name="settings" /></button>
+          <button className={`icon-btn ${pane === 'settings' ? 'active' : ''}`} title={tr('Membres et réglages', 'Members and settings')} onClick={() => setPane(pane === 'settings' ? 'chat' : 'settings')}><Icon name="settings" /></button>
           <WindowButtons />
         </div>
       </div>
 
       {pane !== 'settings' && (
         <div className="pivot">
-          <button className={`pivot-btn ${pane === 'chat' ? 'active' : ''}`} onClick={() => setPane('chat')}>Discussion</button>
+          <button className={`pivot-btn ${pane === 'chat' ? 'active' : ''}`} onClick={() => setPane('chat')}>{tr('Discussion', 'Chat')}</button>
           <button className={`pivot-btn ${pane === 'files' ? 'active' : ''}`} onClick={() => setPane('files')}>
-            Fichiers{files.length > 0 && <span className="badge muted">{files.length}</span>}
+            {tr('Fichiers', 'Files')}{files.length > 0 && <span className="badge muted">{files.length}</span>}
           </button>
         </div>
       )}
@@ -507,11 +533,11 @@ export function GroupView({ gid, friends, notice, dropping, onPasteFiles, onChan
 
       {detail?.removed && (
         <div className="group-banner danger">
-          Vous avez été retiré de ce groupe.
-          <button className="btn-link" onClick={() => { api.forgetGroup(gid).catch(() => {}).then(() => onChangeRef.current?.()); onBack(); }}>Supprimer de la liste</button>
+          {tr('Vous avez été retiré de ce groupe.', 'You were removed from this group.')}
+          <button className="btn-link" onClick={() => { api.forgetGroup(gid).catch(() => {}).then(() => onChangeRef.current?.()); onBack(); }}>{tr('Supprimer de la liste', 'Remove from the list')}</button>
         </div>
       )}
-      {detail?.syncing && <div className="group-banner">Récupération du groupe auprès de vos amis…</div>}
+      {detail?.syncing && <div className="group-banner">{tr('Récupération du groupe auprès de vos amis…', 'Getting the group from your friends…')}</div>}
 
       {pane === 'chat' && (
         <>
@@ -520,7 +546,7 @@ export function GroupView({ gid, friends, notice, dropping, onPasteFiles, onChan
             {messages.length === 0 && (
               <div className="empty-state">
                 <Icon name="chat" size={32} />
-                Aucun message. Lancez la discussion !
+                {tr('Aucun message. Lancez la discussion !', 'No messages. Start the chat!')}
               </div>
             )}
             {rows}
@@ -530,7 +556,7 @@ export function GroupView({ gid, friends, notice, dropping, onPasteFiles, onChan
             value={input}
             onChange={type}
             onSend={send}
-            placeholder={inactive ? 'Discussion indisponible' : 'Écrire au groupe… (@ pour mentionner)'}
+            placeholder={inactive ? tr('Discussion indisponible', 'Chat unavailable') : tr('Écrire au groupe… (@ pour mentionner)', 'Write to the group… (@ to mention)')}
             disabled={inactive}
             maxLength={5000}
             error={error}
@@ -579,16 +605,19 @@ export function GroupView({ gid, friends, notice, dropping, onPasteFiles, onChan
         <div className="content drop-area">
           {error && <div className="error-text">{error}</div>}
           <button className="btn" style={{ width: '100%' }} disabled={inactive || adding} onClick={addFiles}>
-            <Icon name="fileUp" size={14} />{adding ? 'Ajout en cours…' : 'Ajouter des fichiers'}
+            <Icon name="fileUp" size={14} />{adding ? tr('Ajout en cours…', 'Adding…') : tr('Ajouter des fichiers', 'Add files')}
           </button>
           <div className="setting-sub">
-            Les fichiers restent chez celui qui les partage : chacun télécharge ce qu’il veut, depuis n’importe quel membre qui l’a.
-            {!isMobile && ' Glissez ici des fichiers ou des dossiers pour les ajouter.'}
+            {tr(
+              'Les fichiers restent chez celui qui les partage : chacun télécharge ce qu’il veut, depuis n’importe quel membre qui l’a.',
+              'Files stay with whoever shares them: everyone downloads what they want, from any member who has it.',
+            )}
+            {!isMobile && tr(' Glissez ici des fichiers ou des dossiers pour les ajouter.', ' Drop files or folders here to add them.')}
           </div>
           {files.length === 0 && (
             <div className="empty-state">
               <Icon name="folder" size={32} />
-              Le dépôt est vide.
+              {tr('Le dépôt est vide.', 'No shared files yet.')}
             </div>
           )}
           {files.length > 0 && <GroupFileList gid={gid} files={files} inactive={inactive} onDownload={download} onPin={togglePin} />}
@@ -628,11 +657,11 @@ function GroupFileList({ gid, files, inactive, onDownload, onPin }: {
             <div className="item-body">
               <div className="item-title title-with-icon" title={f.dir ? `${f.dir}/${f.name}` : f.name}>
                 <span className="ellipsis">{f.name}</span>
-                {f.pinned && <span className="muted-icon" title="Épinglé"><Icon name="pin" size={12} /></span>}
+                {f.pinned && <span className="muted-icon" title={tr('Épinglé', 'Pinned')}><Icon name="pin" size={12} /></span>}
               </div>
               {f.dir && <div className="item-sub ellipsis file-dir"><Icon name="folder" size={11} /> {f.dir}</div>}
               <div className="item-sub ellipsis">
-                {formatBytes(f.size)} · {f.mine ? 'vous' : f.authorName} · {formatDate(f.ts)}
+                {formatBytes(f.size)} · {f.mine ? tr('vous', 'you') : f.authorName} · {formatDate(f.ts)}
               </div>
               {t && (
                 <>
@@ -640,30 +669,30 @@ function GroupFileList({ gid, files, inactive, onDownload, onPin }: {
                     <div className="progress-fill" style={{ width: `${t.progress}%`, background: 'var(--accent)' }} />
                   </div>
                   <div className="item-sub">
-                    {t.status === 'paused' ? (t.error ?? 'En attente…') : `${t.progress}% · ${formatBytes(t.bytes)} / ${formatBytes(t.fileSize)}`}
+                    {t.status === 'paused' ? (t.error ?? tr('En attente…', 'Waiting…')) : `${t.progress}% · ${formatBytes(t.bytes)} / ${formatBytes(t.fileSize)}`}
                   </div>
                 </>
               )}
               {failed && (
                 <div className="error-text" style={{ marginTop: 4 }}>
-                  {failed.status === 'cancelled' ? 'Téléchargement annulé.' : failed.error ?? 'Échec du téléchargement.'}
+                  {failed.status === 'cancelled' ? tr('Téléchargement annulé.', 'Download cancelled.') : failed.error ?? tr('Échec du téléchargement.', 'Download failed.')}
                 </div>
               )}
               <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 6, marginTop: 8 }}>
                 {f.local && (
-                  <button className="btn btn-secondary btn-small" onClick={() => api.showGroupFile(gid, f.id)}><Icon name="folder" size={14} />Afficher</button>
+                  <button className="btn btn-secondary btn-small" onClick={() => api.showGroupFile(gid, f.id)}><Icon name="folder" size={14} />{tr('Afficher', 'Show')}</button>
                 )}
                 {!f.local && !t && (
-                  <button className="btn btn-small" disabled={inactive} onClick={() => onDownload(f.id)}><Icon name="down" size={14} />Télécharger</button>
+                  <button className="btn btn-small" disabled={inactive} onClick={() => onDownload(f.id)}><Icon name="down" size={14} />{tr('Télécharger', 'Download')}</button>
                 )}
                 {t && (
-                  <button className="btn btn-secondary btn-small" onClick={() => api.cancelTransfer(t.id)}>Annuler</button>
+                  <button className="btn btn-secondary btn-small" onClick={() => api.cancelTransfer(t.id)}>{tr('Annuler', 'Cancel')}</button>
                 )}
-                <button className={`icon-btn ${f.pinned ? 'active' : ''}`} title={f.pinned ? 'Désépingler' : 'Épingler'} disabled={inactive} onClick={() => onPin(f.id, f.pinned)}>
+                <button className={`icon-btn ${f.pinned ? 'active' : ''}`} title={f.pinned ? tr('Désépingler', 'Unpin') : tr('Épingler', 'Pin')} disabled={inactive} onClick={() => onPin(f.id, f.pinned)}>
                   <Icon name="pin" />
                 </button>
                 {f.mine && (
-                  <button className="icon-btn danger" title="Retirer du dépôt" onClick={() => api.deleteGroupFile(gid, f.id)}><Icon name="trash" /></button>
+                  <button className="icon-btn danger" title={tr('Retirer du dépôt', 'Remove from the shared files')} onClick={() => api.deleteGroupFile(gid, f.id)}><Icon name="trash" /></button>
                 )}
               </div>
             </div>
@@ -696,39 +725,41 @@ function GroupSettings({ detail, friends, onDone, onLeft, onChanged }: {
 
   const addMembers = async () => {
     const res = await api.addGroupMembers(gid, adding);
-    if ('error' in res) return setError(GROUP_ERRORS[res.error] ?? 'Impossible d’ajouter ces amis.');
+    if ('error' in res) return setError(GROUP_ERRORS[res.error] ?? tr('Impossible d’ajouter ces amis.', 'Could not add these friends.'));
     setAdding([]);
     setError('');
   };
 
   const rename = () => {
     setActionError('');
-    api.renameGroup(gid, name).catch(() => setActionError('Impossible de renommer le groupe.'));
+    api.renameGroup(gid, name).catch(() => setActionError(tr('Impossible de renommer le groupe.', 'Could not rename the group.')));
   };
 
   const leave = () => {
     setActionError('');
-    api.leaveGroup(gid).then(onLeft, () => setActionError(active ? 'Impossible de quitter le groupe.' : 'Impossible de supprimer le groupe de la liste.'));
+    api.leaveGroup(gid).then(onLeft, () => setActionError(active
+      ? tr('Impossible de quitter le groupe.', 'Could not leave the group.')
+      : tr('Impossible de supprimer le groupe de la liste.', 'Could not remove the group from the list.')));
   };
 
   const setMuted = (muted: boolean) => {
-    api.setGroupMuted(gid, muted).then(onChanged, () => setActionError('Impossible de changer les notifications.'));
+    api.setGroupMuted(gid, muted).then(onChanged, () => setActionError(tr('Impossible de changer les notifications.', 'Could not change the notifications.')));
   };
 
   return (
     <div className="content">
       <div className="page-title">
-        <button className="icon-btn" title="Retour" onClick={onDone}><Icon name="back" /></button>
-        <span>Membres et réglages</span>
+        <button className="icon-btn" title={tr('Retour', 'Back')} onClick={onDone}><Icon name="back" /></button>
+        <span>{tr('Membres et réglages', 'Members and settings')}</span>
       </div>
       {actionError && <div className="error-text">{actionError}</div>}
 
       {active && (
         <div className="card stack">
-          <div className="card-label" style={{ marginBottom: 0 }}>Nom du groupe</div>
+          <div className="card-label" style={{ marginBottom: 0 }}>{tr('Nom du groupe', 'Group name')}</div>
           <div style={{ display: 'flex', gap: 8 }}>
             <input className="input" maxLength={60} value={name} onChange={e => setName(e.target.value)} />
-            <button className="btn btn-secondary btn-small" style={{ height: 34 }} disabled={!name.trim() || name.trim() === detail.name} onClick={rename}>Renommer</button>
+            <button className="btn btn-secondary btn-small" style={{ height: 34 }} disabled={!name.trim() || name.trim() === detail.name} onClick={rename}>{tr('Renommer', 'Rename')}</button>
           </div>
         </div>
       )}
@@ -737,8 +768,8 @@ function GroupSettings({ detail, friends, onDone, onLeft, onChanged }: {
         <div className="card">
           <div className="setting-row">
             <div>
-              <div className="setting-label">Désactiver les notifications</div>
-              <div className="setting-sub">Seuls les messages qui mentionnent votre pseudo vous notifient.</div>
+              <div className="setting-label">{tr('Désactiver les notifications', 'Turn off notifications')}</div>
+              <div className="setting-sub">{tr('Seuls les messages qui mentionnent votre pseudo vous notifient.', 'Only messages that mention your nickname notify you.')}</div>
             </div>
             <label className="toggle">
               <input type="checkbox" checked={detail.muted} onChange={e => setMuted(e.target.checked)} />
@@ -756,11 +787,11 @@ function GroupSettings({ detail, friends, onDone, onLeft, onChanged }: {
             <div className="item-body">
               <div className="item-title">{m.name}{m.me && ' (vous)'}</div>
               <div className={`item-sub ${m.online ? 'online' : ''}`}>
-                {m.me ? 'Vous' : m.online ? 'En ligne' : 'Hors ligne'}{!m.me && m.friend && ' · ami'}
+                {m.me ? tr('Vous', 'You') : m.online ? tr('En ligne', 'Online') : tr('Hors ligne', 'Offline')}{!m.me && m.friend && tr(' · ami', ' · friend')}
               </div>
             </div>
             {active && m.removable && (
-              <button className="btn btn-secondary btn-small" onClick={() => api.removeGroupMember(gid, m.id)}>Retirer</button>
+              <button className="btn btn-secondary btn-small" onClick={() => api.removeGroupMember(gid, m.id)}>{tr('Retirer', 'Remove')}</button>
             )}
           </div>
         ))}
@@ -768,28 +799,30 @@ function GroupSettings({ detail, friends, onDone, onLeft, onChanged }: {
 
       {active && (
         <>
-          <div className="section-header">Inviter des amis</div>
+          <div className="section-header">{tr('Inviter des amis', 'Invite friends')}</div>
           <FriendPicker friends={candidates} selected={adding} onChange={setAdding} />
           {error && <div className="error-text">{error}</div>}
           {candidates.length > 0 && (
-            <button className="btn" disabled={adding.length === 0} onClick={addMembers}><Icon name="plus" size={14} />Inviter</button>
+            <button className="btn" disabled={adding.length === 0} onClick={addMembers}><Icon name="plus" size={14} />{tr('Inviter', 'Invite')}</button>
           )}
         </>
       )}
 
-      <div className="section-header">Quitter</div>
+      <div className="section-header">{tr('Quitter', 'Leave')}</div>
       {!confirmLeave ? (
         <button className="btn btn-danger" onClick={() => setConfirmLeave(true)}>
-          {active ? 'Quitter le groupe' : 'Supprimer de la liste'}
+          {active ? tr('Quitter le groupe', 'Leave the group') : tr('Supprimer de la liste', 'Remove from the list')}
         </button>
       ) : (
         <div className="card stack">
           <div className="setting-sub">
-            {active ? 'Vous ne recevrez plus les messages ni les fichiers de ce groupe.' : 'Le groupe disparaîtra de votre liste.'}
+            {active
+              ? tr('Vous ne recevrez plus les messages ni les fichiers de ce groupe.', 'You will no longer get this group’s messages or files.')
+              : tr('Le groupe disparaîtra de votre liste.', 'The group will go from your list.')}
           </div>
           <div style={{ display: 'flex', gap: 8 }}>
-            <button className="btn btn-danger" style={{ flex: 1 }} onClick={leave}>Confirmer</button>
-            <button className="btn btn-secondary" style={{ flex: 1 }} onClick={() => setConfirmLeave(false)}>Annuler</button>
+            <button className="btn btn-danger" style={{ flex: 1 }} onClick={leave}>{tr('Confirmer', 'Confirm')}</button>
+            <button className="btn btn-secondary" style={{ flex: 1 }} onClick={() => setConfirmLeave(false)}>{tr('Annuler', 'Cancel')}</button>
           </div>
         </div>
       )}

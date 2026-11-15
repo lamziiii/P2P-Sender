@@ -47,6 +47,7 @@ fn hooks() -> Hooks {
     Hooks {
         on_text: Arc::new(|_, _| {}),
         on_devices: Arc::new(|| {}),
+        on_proven: Arc::new(|_| {}),
     }
 }
 

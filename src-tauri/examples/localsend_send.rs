@@ -61,6 +61,7 @@ async fn main() {
     let hooks = Hooks {
         on_text: Arc::new(|_, _| {}),
         on_devices: Arc::new(|| {}),
+        on_proven: Arc::new(|_| {}),
     };
     let service = LocalSend::start(node.clone(), &id, "P2P Share envoi", hooks)
         .await

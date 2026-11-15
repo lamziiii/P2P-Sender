@@ -3,9 +3,11 @@ mod android;
 mod backup;
 pub mod group;
 pub mod invite;
+mod lang;
 pub mod localsend;
 mod notify;
 pub mod p2p;
+mod share;
 pub mod store;
 mod system;
 mod update;
@@ -108,6 +110,14 @@ struct Config {
     /// screen is closed, like the desktop app in the tray.
     #[serde(default = "enabled")]
     background_service: bool,
+    /// Desktop: "Envoyer avec P2P Share" in the right-click menu (Windows)
+    /// or "Open with" (Linux), see share.rs.
+    #[serde(default = "enabled")]
+    send_menu: bool,
+    /// The window's language ("fr", "en"), told at each start: the
+    /// backend's texts follow it (see lang.rs). Empty until then.
+    #[serde(default)]
+    language: String,
 }
 
 /// What gives a system notification: all of it, by kind, and the chats
@@ -195,6 +205,9 @@ struct AppState {
     localsend: Mutex<LocalSendSlot>,
     /// Text messages exchanged with LocalSend devices, by fingerprint.
     localsend_chats: Mutex<JsonStore<LocalSendChats>>,
+    /// Fingerprints of the LocalSend devices we exchanged with that a
+    /// certificate proved: never sent to in clear, even after a restart.
+    localsend_proven: Mutex<JsonStore<Vec<String>>>,
     /// A save of the chats is due (see `localsend_chats_changed`).
     localsend_save_armed: AtomicBool,
     /// Session locked or on battery: background work is cut down.
@@ -242,6 +255,8 @@ const MAX_LOCALSEND_STORED_TEXT: usize = 10_000;
 /// Anyone on the network can start a chat (a new certificate each time):
 /// beyond that many, or that much text, the least useful chats go.
 const MAX_LOCALSEND_CHATS: usize = 100;
+/// LocalSend devices kept as proven by a certificate (see `localsend_proven`).
+const MAX_LOCALSEND_PROVEN: usize = 1000;
 const MAX_LOCALSEND_BYTES: usize = 16 * 1024 * 1024;
 /// The chats are rewritten whole: at most that often, that long after they
 /// changed.
@@ -286,6 +301,24 @@ impl AppState {
         self.localsend_chats.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    fn localsend_proven(&self) -> std::sync::MutexGuard<'_, JsonStore<Vec<String>>> {
+        self.localsend_proven.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// A LocalSend device we exchanged with proved its fingerprint: kept,
+    /// the oldest going beyond `MAX_LOCALSEND_PROVEN`.
+    fn note_localsend_proven(&self, fingerprint: String) {
+        let fingerprint = fingerprint.to_ascii_uppercase();
+        let mut proven = self.localsend_proven();
+        if proven.data.contains(&fingerprint) {
+            return;
+        }
+        proven.data.push(fingerprint);
+        let excess = proven.data.len().saturating_sub(MAX_LOCALSEND_PROVEN);
+        proven.data.drain(..excess);
+        log_save(proven.save_now());
+    }
+
     /// Add or update a message of a device's chat, and tell the window; it
     /// is written a moment later. False if the message was refused.
     fn put_localsend_message(
@@ -297,11 +330,15 @@ impl AppState {
     ) -> bool {
         // Before taking the chats: never both locks at once.
         let secure_device = message.unverified
-            && self.localsend().service.as_ref().is_some_and(|s| {
+            && (self.localsend().service.as_ref().is_some_and(|s| {
                 s.devices()
                     .iter()
                     .any(|d| d.fingerprint == fingerprint && d.secure)
-            });
+            }) || self
+                .localsend_proven()
+                .data
+                .iter()
+                .any(|f| f.eq_ignore_ascii_case(fingerprint)));
         let alias = {
             let mut chats = self.localsend_chats();
             // An older LocalSend only claims its fingerprint: anyone could
@@ -383,11 +420,16 @@ impl AppState {
 
     async fn start_localsend(&self, app: &AppHandle) {
         let alias = self.config().data.nickname.clone();
-        let (text_app, devices_app) = (app.clone(), app.clone());
+        let (text_app, devices_app, proven_app) = (app.clone(), app.clone(), app.clone());
         let hooks = localsend::Hooks {
             on_text: Arc::new(move |from, text| on_localsend_text(&text_app, from, text)),
             on_devices: Arc::new(move || {
                 let _ = devices_app.emit("localsend-devices", ());
+            }),
+            on_proven: Arc::new(move |fingerprint| {
+                if let Some(state) = proven_app.try_state::<AppState>() {
+                    state.note_localsend_proven(fingerprint);
+                }
             }),
         };
         let started =
@@ -397,6 +439,8 @@ impl AppState {
             };
         if let Ok(service) = &started {
             // Proven in an earlier run: a plain claim must not take them over.
+            let proven = self.localsend_proven().data.clone();
+            service.remember_verified(proven.iter().map(String::as_str));
             let chats = self.localsend_chats();
             service.remember_verified(
                 chats
@@ -426,7 +470,7 @@ impl AppState {
                 eprintln!("LocalSend unavailable: {e}");
                 *slot = LocalSendSlot {
                     service: None,
-                    error: Some(format!("Démarrage impossible : {e}")),
+                    error: Some(trf!("Démarrage impossible : {e}", "Could not start: {e}")),
                 };
             }
         }
@@ -539,19 +583,27 @@ struct InviteView {
     known: bool,
     /// One of our own links.
     own: bool,
+    /// Their ID, to tell them apart from someone with the same nickname.
+    id: String,
+    /// A friend already has this name: maybe someone copying it.
+    lookalike: bool,
 }
 
 fn invite_view(state: &AppState, link: String) -> Option<InviteView> {
     let parsed = invite::parse(&link)?;
-    let known = state
-        .node
-        .friends()
-        .iter()
-        .any(|f| f.id == parsed.id && f.online);
+    let friends = state.node.friends();
+    let known = friends.iter().any(|f| f.id == parsed.id && f.online);
+    let name = parsed.name.trim().to_lowercase();
+    let lookalike = !name.is_empty()
+        && friends
+            .iter()
+            .any(|f| f.id != parsed.id && f.name.trim().to_lowercase() == name);
     Some(InviteView {
         own: parsed.id == state.node.id(),
         known,
         name: parsed.name,
+        id: parsed.id,
+        lookalike,
         link,
     })
 }
@@ -607,7 +659,13 @@ fn take_invite_link(app: AppHandle, state: State<AppState>) -> Option<InviteView
 #[tauri::command]
 fn read_invite_link(state: State<AppState>, link: String) -> Result<InviteView, String> {
     invite_view(&state, link.trim().to_string())
-        .ok_or_else(|| "Ce n’est pas un lien d’invitation P2P Share valide.".to_string())
+        .ok_or_else(|| {
+            lang::tr(
+                "Ce n’est pas un lien d’invitation P2P Share valide.",
+                "This is not a valid P2P Share invitation link.",
+            )
+            .to_string()
+        })
 }
 
 #[tauri::command]
@@ -706,7 +764,7 @@ async fn set_relay(
         // Restarting without it saved would silently drop the setting.
         config
             .save_now()
-            .map_err(|e| format!("Enregistrement du réglage impossible : {e}"))?;
+            .map_err(|e| trf!("Enregistrement du réglage impossible : {e}", "Could not save the setting: {e}"))?;
     }
     std::env::set_var(SHOW_AFTER_RESTART, "1");
     restart_app(&app);
@@ -729,7 +787,7 @@ async fn set_local_network(
         // Restarting without it saved would silently drop the setting.
         config
             .save_now()
-            .map_err(|e| format!("Enregistrement du réglage impossible : {e}"))?;
+            .map_err(|e| trf!("Enregistrement du réglage impossible : {e}", "Could not save the setting: {e}"))?;
     }
     std::env::set_var(SHOW_AFTER_RESTART, "1");
     restart_app(&app);
@@ -745,7 +803,7 @@ async fn select_download_dir(
     let mut dialog = app
         .dialog()
         .file()
-        .set_title("Choisir le dossier de téléchargement");
+        .set_title(lang::tr("Choisir le dossier de téléchargement", "Choose the download folder"));
     #[cfg(desktop)]
     if let Some(w) = app.get_webview_window("main") {
         dialog = dialog.set_parent(&w);
@@ -778,6 +836,40 @@ fn set_auto_launch(app: AppHandle, state: State<AppState>, enable: bool) -> bool
     config.data.auto_launch = enable;
     log_save(config.save_now());
     apply_auto_launch(&app, enable);
+    enable
+}
+
+/// The window's language, at each start and when chosen: the backend's
+/// texts follow (tray menu now, the rest as they come).
+#[tauri::command]
+fn set_language(app: AppHandle, state: State<AppState>, lang: String) {
+    let lang = if lang == "en" { "en" } else { "fr" };
+    {
+        let mut config = state.config();
+        if config.data.language == lang {
+            return;
+        }
+        config.data.language = lang.to_string();
+        log_save(config.save_now());
+    }
+    lang::set(lang);
+    #[cfg(target_os = "android")]
+    android::set_language(lang);
+    #[cfg(desktop)]
+    if let (Some(tray), Ok(menu)) = (app.tray_by_id("main"), tray_menu(&app)) {
+        let _ = tray.set_menu(Some(menu));
+    }
+    #[cfg(mobile)]
+    let _ = app;
+}
+
+/// "Envoyer avec P2P Share" where the system takes it (see share.rs).
+#[tauri::command]
+fn set_send_menu(state: State<AppState>, enable: bool) -> bool {
+    let mut config = state.config();
+    config.data.send_menu = enable;
+    log_save(config.save_now());
+    share::apply_menu(enable);
     enable
 }
 
@@ -992,7 +1084,7 @@ async fn send_folder(
     let mut dialog = app
         .dialog()
         .file()
-        .set_title("Sélectionner le dossier à envoyer");
+        .set_title(lang::tr("Sélectionner le dossier à envoyer", "Select the folder to send"));
     if let Some(w) = app.get_webview_window("main") {
         dialog = dialog.set_parent(&w);
     }
@@ -1034,7 +1126,7 @@ async fn send_file(
     let mut dialog = app
         .dialog()
         .file()
-        .set_title("Sélectionner les fichiers à envoyer");
+        .set_title(lang::tr("Sélectionner les fichiers à envoyer", "Select the files to send"));
     #[cfg(desktop)]
     if let Some(w) = app.get_webview_window("main") {
         dialog = dialog.set_parent(&w);
@@ -1118,6 +1210,34 @@ async fn chat_image(
 const THUMB_SIZE: u32 = 480;
 /// Bigger pictures get no preview: decoding them would take too long.
 const MAX_IMAGE_BYTES: u64 = 64 << 20;
+/// Nor those that take more memory once decoded (about 64 Mpx in color).
+const MAX_DECODED_BYTES: u64 = 256 << 20;
+/// Previews decoded at once: a chat full of images opens one by one.
+const MAX_DECODING: usize = 2;
+static DECODING: (Mutex<usize>, std::sync::Condvar) = (Mutex::new(0), std::sync::Condvar::new());
+
+/// A turn to decode a preview, given back when dropped.
+struct DecodeTurn;
+
+impl DecodeTurn {
+    fn take() -> DecodeTurn {
+        let (count, freed) = &DECODING;
+        let mut n = count.lock().unwrap_or_else(|e| e.into_inner());
+        while *n >= MAX_DECODING {
+            n = freed.wait(n).unwrap_or_else(|e| e.into_inner());
+        }
+        *n += 1;
+        DecodeTurn
+    }
+}
+
+impl Drop for DecodeTurn {
+    fn drop(&mut self) {
+        let (count, freed) = &DECODING;
+        *count.lock().unwrap_or_else(|e| e.into_inner()) -= 1;
+        freed.notify_one();
+    }
+}
 
 fn thumbnail(path: &Path) -> Option<String> {
     use base64::Engine as _;
@@ -1133,16 +1253,22 @@ fn thumbnail(path: &Path) -> Option<String> {
     let mut limits = image::Limits::default();
     limits.max_image_width = Some(16_384);
     limits.max_image_height = Some(16_384);
-    limits.max_alloc = Some(512 << 20);
+    limits.max_alloc = Some(MAX_DECODED_BYTES);
     reader.limits(limits);
+    let _turn = DecodeTurn::take();
     let mut decoder = reader.into_decoder().ok()?;
+    // The limits do not cover the whole picture here: checked first.
+    if decoder.total_bytes() > MAX_DECODED_BYTES {
+        return None;
+    }
     // Phone photos are often stored sideways, with how to turn them.
     let orientation = decoder.orientation().ok();
-    let mut img = DynamicImage::from_decoder(decoder).ok()?;
+    let img = DynamicImage::from_decoder(decoder).ok()?;
+    // Turned once small: the same result, without a second full copy.
+    let mut img = img.thumbnail(THUMB_SIZE, THUMB_SIZE);
     if let Some(orientation) = orientation {
         img.apply_orientation(orientation);
     }
-    let img = img.thumbnail(THUMB_SIZE, THUMB_SIZE);
     let mut out = std::io::Cursor::new(Vec::new());
     let mime = if img.color().has_alpha() {
         img.write_to(&mut out, ImageFormat::Png).ok()?;
@@ -1270,7 +1396,7 @@ async fn send_localsend_files(
     let mut dialog = app
         .dialog()
         .file()
-        .set_title("Sélectionner les fichiers à envoyer");
+        .set_title(lang::tr("Sélectionner les fichiers à envoyer", "Select the files to send"));
     #[cfg(desktop)]
     if let Some(w) = app.get_webview_window("main") {
         dialog = dialog.set_parent(&w);
@@ -1287,7 +1413,7 @@ async fn send_localsend_files(
     }
     match &state.localsend().service {
         Some(service) => service.send_files(&fingerprint, &paths).map_err(String::from),
-        None => Err("LocalSend est désactivé".into()),
+        None => Err(lang::tr("LocalSend est désactivé", "LocalSend is off").into()),
     }
 }
 
@@ -1304,7 +1430,7 @@ async fn send_localsend_paths(
     let sent = match &state.localsend().service {
         Some(_) if files.is_empty() => 0,
         Some(service) => service.send_files(&fingerprint, &files)?,
-        None => return Err("LocalSend est désactivé".into()),
+        None => return Err(lang::tr("LocalSend est désactivé", "LocalSend is off").into()),
     };
     Ok(json!({ "sent": sent, "skipped": rest.len() }))
 }
@@ -1321,7 +1447,7 @@ const PASTED_KEEP: Duration = Duration::from_secs(30 * 24 * 3600);
 fn save_pasted(state: State<AppState>, request: tauri::ipc::Request) -> Result<String, String> {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let tauri::ipc::InvokeBody::Raw(data) = request.body() else {
-        return Err("Fichier collé illisible".into());
+        return Err(lang::tr("Fichier collé illisible", "Pasted file unreadable").into());
     };
     let name = request
         .headers()
@@ -1451,7 +1577,10 @@ fn send_localsend_text(
         return Err("Message vide".into());
     }
     if text.chars().count() > MAX_LOCALSEND_TEXT {
-        return Err(format!("Message trop long ({MAX_LOCALSEND_TEXT} caractères max)"));
+        return Err(trf!(
+            "Message trop long ({MAX_LOCALSEND_TEXT} caractères max)",
+            "Message too long ({MAX_LOCALSEND_TEXT} characters max)"
+        ));
     }
     let message = LocalSendMessage {
         id: uuid::Uuid::new_v4().to_string(),
@@ -1486,7 +1615,7 @@ fn send_localsend_text(
             }
             state.put_localsend_message(&handle, &fp, None, message);
         }),
-        None => Err("LocalSend est désactivé"),
+        None => Err(lang::tr("LocalSend est désactivé", "LocalSend is off")),
     };
     let mut message = message;
     if let Err(e) = started {
@@ -1616,7 +1745,7 @@ async fn add_group_files(
     let mut dialog = app
         .dialog()
         .file()
-        .set_title("Ajouter des fichiers au dépôt du groupe");
+        .set_title(lang::tr("Ajouter des fichiers au dépôt du groupe", "Add files to the group’s shared files"));
     #[cfg(desktop)]
     if let Some(w) = app.get_webview_window("main") {
         dialog = dialog.set_parent(&w);
@@ -1935,20 +2064,37 @@ fn position_window(w: &WebviewWindow) {
 }
 
 #[cfg(desktop)]
-fn create_tray(app: &AppHandle) -> tauri::Result<()> {
-    let quit = MenuItem::with_id(app, "quit", "Quit P2P Share", true, None::<&str>)?;
+fn tray_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
+    let quit = MenuItem::with_id(
+        app,
+        "quit",
+        lang::tr("Quitter P2P Share", "Quit P2P Share"),
+        true,
+        None::<&str>,
+    )?;
     // Linux tray icons do not report clicks: offer the window in the menu.
     #[cfg(target_os = "linux")]
     let menu = Menu::with_items(
         app,
         &[
-            &MenuItem::with_id(app, "show", "Ouvrir P2P Share", true, None::<&str>)?,
+            &MenuItem::with_id(
+                app,
+                "show",
+                lang::tr("Ouvrir P2P Share", "Open P2P Share"),
+                true,
+                None::<&str>,
+            )?,
             &quit,
         ],
     )?;
     #[cfg(not(target_os = "linux"))]
     let menu = Menu::with_items(app, &[&quit])?;
+    Ok(menu)
+}
 
+#[cfg(desktop)]
+fn create_tray(app: &AppHandle) -> tauri::Result<()> {
+    let menu = tray_menu(app)?;
     let mut tray = TrayIconBuilder::with_id("main")
         .tooltip("P2P Share")
         .menu(&menu)
@@ -1999,12 +2145,21 @@ fn apply_auto_launch(app: &AppHandle, enable: bool) {
 
 // ─── Events from the P2P core ────────────────────────────────────────────────
 
+/// After an offer's notification: what to do with it.
+fn tap_to_answer() -> &'static str {
+    if cfg!(mobile) {
+        lang::tr("Touchez pour accepter ou refuser.", "Tap to accept or decline.")
+    } else {
+        lang::tr("Cliquez pour accepter ou refuser.", "Click to accept or decline.")
+    }
+}
+
 fn format_size(bytes: u64) -> String {
     let b = bytes as f64;
     if b >= 1024f64.powi(3) {
-        format!("{:.2} Go", b / 1024f64.powi(3))
+        format!("{:.2} {}", b / 1024f64.powi(3), lang::tr("Go", "GB"))
     } else {
-        format!("{:.2} Mo", b / 1024f64.powi(2))
+        format!("{:.2} {}", b / 1024f64.powi(2), lang::tr("Mo", "MB"))
     }
 }
 
@@ -2071,11 +2226,15 @@ fn on_p2p_event(app: &AppHandle, event: Event) {
         }
         Event::InviteAccepted { friend_id, name } => {
             if notice_allowed(app, Notice::Friend(&friend_id)) {
-                let who = if name.is_empty() { "Votre ami" } else { name.as_str() };
+                let who = if name.is_empty() {
+                    lang::tr("Votre ami", "Your friend")
+                } else {
+                    name.as_str()
+                };
                 notify_chat(
                     app,
-                    "Invitation acceptée",
-                    &format!("{who} est maintenant dans vos amis."),
+                    lang::tr("Invitation acceptée", "Invitation accepted"),
+                    &trf!("{who} est maintenant dans vos amis.", "{who} is now your friend."),
                     "friend",
                     friend_id,
                 );
@@ -2130,9 +2289,10 @@ fn on_p2p_event(app: &AppHandle, event: Event) {
             let from = sender_name(app, &t);
             let (title, what) = if let Some(folder) = &t.folder {
                 (
-                    format!("{from} vous envoie un dossier"),
-                    format!(
+                    trf!("{from} vous envoie un dossier", "{from} sends you a folder"),
+                    trf!(
                         "\"{}\" ({} fichiers, {})",
+                        "\"{}\" ({} files, {})",
                         folder.name,
                         folder.files,
                         format_size(folder.size)
@@ -2140,24 +2300,27 @@ fn on_p2p_event(app: &AppHandle, event: Event) {
                 )
             } else if count > 1 {
                 (
-                    format!("{from} vous envoie {count} fichiers"),
-                    format!("dont \"{}\"", t.file_name),
+                    trf!("{from} vous envoie {count} fichiers", "{from} sends you {count} files"),
+                    trf!("dont \"{}\"", "including \"{}\"", t.file_name),
                 )
             } else {
                 (
-                    format!("{from} vous envoie un fichier"),
+                    trf!("{from} vous envoie un fichier", "{from} sends you a file"),
                     format!("\"{}\" ({})", t.file_name, format_size(t.file_size)),
                 )
             };
             let warning = if t.executable {
-                " Attention : ce fichier peut exécuter du code."
+                lang::tr(
+                    " Attention : ce fichier peut exécuter du code.",
+                    " Warning: this file can run code.",
+                )
             } else {
                 ""
             };
             notify::notify(
                 app,
                 &title,
-                &format!("{what} — Cliquez pour accepter ou refuser.{warning}"),
+                &format!("{what} — {}{warning}", tap_to_answer()),
                 move || {
                     show_window(&handle);
                 },
@@ -2172,13 +2335,13 @@ fn on_p2p_event(app: &AppHandle, event: Event) {
             // A folder's: once all its files are in.
             let (title, body, shown) = match &t.folder {
                 Some(folder) => (
-                    format!("Dossier reçu de {from}"),
-                    format!("\"{}\" a été enregistré.", folder.name),
+                    trf!("Dossier reçu de {from}", "Folder received from {from}"),
+                    trf!("\"{}\" a été enregistré.", "\"{}\" was saved.", folder.name),
                     folder.root.clone(),
                 ),
                 None => (
-                    format!("Fichier reçu de {from}"),
-                    format!("\"{}\" a été enregistré.", t.file_name),
+                    trf!("Fichier reçu de {from}", "File received from {from}"),
+                    trf!("\"{}\" a été enregistré.", "\"{}\" was saved.", t.file_name),
                     t.saved_path.clone(),
                 ),
             };
@@ -2201,7 +2364,7 @@ fn on_p2p_event(app: &AppHandle, event: Event) {
             // Muted groups only send what mentions us (see groups.rs).
             if !window_focused(app) && notice_allowed(app, Notice::Group) {
                 let title = if mention {
-                    format!("{author} vous a mentionné dans {group}")
+                    trf!("{author} vous a mentionné dans {group}", "{author} mentioned you in {group}")
                 } else {
                     format!("{group} — {author}")
                 };
@@ -2219,8 +2382,12 @@ fn on_p2p_event(app: &AppHandle, event: Event) {
             let handle = app.clone();
             notify::notify(
                 app,
-                &format!("{from} vous invite dans un groupe"),
-                &format!("« {group} » — Cliquez pour accepter ou refuser."),
+                &trf!("{from} vous invite dans un groupe", "{from} invites you to a group"),
+                &format!(
+                    "{} — {}",
+                    trf!("« {group} »", "“{group}”"),
+                    tap_to_answer()
+                ),
                 move || {
                     show_window(&handle);
                 },
@@ -2465,6 +2632,8 @@ fn setup(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
             speed_limit: 0,
             notifications: NotifySettings::default(),
             background_service: true,
+            send_menu: true,
+            language: String::new(),
         },
     );
     if config.data.download_path.is_empty() {
@@ -2472,6 +2641,7 @@ fn setup(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
         log_save(config.save_now());
     }
     let auto_launch = config.data.auto_launch;
+    lang::set(&config.data.language);
     let local_network = config.data.local_network;
     config.data.localsend = true;
     let nickname = config.data.nickname.clone();
@@ -2552,6 +2722,10 @@ fn setup(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
             dir.join("localsend-chats.json"),
             LocalSendChats::new(),
         )),
+        localsend_proven: Mutex::new(JsonStore::load_sealed(
+            dir.join("localsend-proven.json"),
+            Vec::new(),
+        )),
         localsend_save_armed: AtomicBool::new(false),
         economy: AtomicBool::new(false),
         network_watched: AtomicBool::new(false),
@@ -2576,10 +2750,8 @@ fn setup(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
         android::set_service(app.state::<AppState>().config().data.background_service);
     }
     #[cfg(desktop)]
-    {
-        create_tray(app)?;
-        update::start(app);
-    }
+    create_tray(app)?;
+    update::start(app);
     {
         use tauri_plugin_deep_link::DeepLinkExt;
         // The installers register the links too; an AppImage, a portable or
@@ -2597,6 +2769,17 @@ fn setup(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
         #[cfg(desktop)]
         if let Ok(Some(urls)) = app.deep_link().get_current() {
             on_invite_link(app, urls);
+        }
+    }
+    #[cfg(desktop)]
+    {
+        share::apply_menu(app.state::<AppState>().config().data.send_menu);
+        // Started to send files ("Envoyer avec P2P Share").
+        let args: Vec<String> = std::env::args().collect();
+        let cwd = std::env::current_dir().unwrap_or_default();
+        let paths = share::paths_from_args(&args, &cwd);
+        if !paths.is_empty() {
+            share::receive(app, share::items(&paths), None);
         }
     }
     // Started at login: stay in the tray without creating the web view.
@@ -2668,10 +2851,17 @@ pub fn run() {
     #[allow(unused_mut)]
     let mut builder = tauri::Builder::default();
     // An instance with its own data folder (tests) runs alongside the real one.
-    #[cfg(desktop)]
+    // macOS keeps one instance itself (links and files come as events).
+    #[cfg(any(windows, target_os = "linux"))]
     if std::env::var_os("P2PSHARE_DATA_DIR").is_none() {
-        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            show_window(app);
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, cwd| {
+            // Files to send (one launch per file from the Explorer's menu).
+            let paths = share::paths_from_args(&args, Path::new(&cwd));
+            if paths.is_empty() {
+                show_window(app);
+            } else {
+                share::receive(app, share::items(&paths), None);
+            }
         }));
     }
     #[cfg(desktop)]
@@ -2711,6 +2901,7 @@ pub fn run() {
             update::check_update,
             update::install_update,
             update::set_auto_update,
+            update::update_asks_password,
             get_my_id,
             get_friends,
             add_friend,
@@ -2724,6 +2915,10 @@ pub fn run() {
             select_download_dir,
             set_auto_launch,
             set_background_service,
+            set_send_menu,
+            set_language,
+            share::take_shared,
+            share::shared_paths,
             get_messages,
             send_message,
             send_file,
@@ -2808,7 +3003,7 @@ pub fn run() {
     let app = match app {
         Ok(app) => app,
         Err(e) => {
-            startup_failed(&format!("P2P Share n'a pas pu démarrer :\n\n{e}"));
+            startup_failed(&trf!("P2P Share n'a pas pu démarrer :\n\n{e}", "P2P Share could not start:\n\n{e}"));
             std::process::exit(1);
         }
     };
@@ -2836,6 +3031,18 @@ pub fn run() {
         #[cfg(target_os = "macos")]
         RunEvent::Reopen { .. } => {
             show_window(app);
+        }
+        // Files opened with the app from the Finder: to send.
+        #[cfg(target_os = "macos")]
+        RunEvent::Opened { urls } => {
+            let paths: Vec<PathBuf> = urls
+                .into_iter()
+                .filter(|u| u.scheme() == "file")
+                .filter_map(|u| u.to_file_path().ok())
+                .collect();
+            if !paths.is_empty() {
+                share::receive(app, share::items(&paths), None);
+            }
         }
         _ => {}
     });

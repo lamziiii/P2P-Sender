@@ -97,7 +97,7 @@ const PATHS: Record<string, ReactNode> = {
   sync: <path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8M3 3v5h5M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16M16 16h5v5" />,
 };
 
-export type IconName = keyof typeof PATHS;
+type IconName = keyof typeof PATHS;
 
 export function Icon({ name, size = 16 }: { name: IconName; size?: number }) {
   return (

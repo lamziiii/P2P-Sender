@@ -956,7 +956,21 @@ impl Log {
             if let Some(f) = self.forks.get(m) {
                 before = before.min(f.n - 1);
             }
-            self.seen_at(m, before.min(top), a) >= n
+            // m's first entry that had it (`seen` grows with m's entries).
+            let steps = self.seen.get(m).and_then(|s| s.get(a));
+            let steps = steps.map(Vec::as_slice).unwrap_or_default();
+            let Some(&(k, _)) = steps.get(steps.partition_point(|(_, s)| *s < n)) else {
+                return false;
+            };
+            // `d` is only m's word: m could not have had an entry dated
+            // after its own (entries from the future are refused), so a
+            // made-up count cannot vouch for what a removed member writes
+            // later.
+            k <= before.min(top)
+                && self
+                    .kept(m, k)
+                    .zip(self.kept(a, n))
+                    .is_some_and(|(mine, theirs)| theirs.t < mine.t)
         })
     }
 
@@ -1700,7 +1714,7 @@ mod tests {
         let to_lb = la.conflicts_with(&lb.have(), &lb.heads());
         assert_eq!(to_lb.len(), 1);
         let got = lb.insert_all(to_lb.into_iter().map(|e| parse(e, "g", false).unwrap()).collect(), true);
-        assert_eq!(got.forked, [b.id.clone()]);
+        assert_eq!(got.forked, std::slice::from_ref(&b.id));
         assert_eq!(lb.forks()[&b.id], n + 1);
         // Swapping proofs walks down to the first entry that differs.
         loop {

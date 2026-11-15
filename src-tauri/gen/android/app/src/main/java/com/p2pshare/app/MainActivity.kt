@@ -15,13 +15,13 @@ class MainActivity : TauriActivity() {
     super.onCreate(savedInstanceState)
     P2PShareService.createChannels(this)
     askPermissions()
-    P2PSharePlugin.handleIntent(intent)
+    P2PSharePlugin.handleIntent(this, intent)
   }
 
   override fun onNewIntent(intent: Intent) {
     super.onNewIntent(intent)
     setIntent(intent)
-    P2PSharePlugin.handleIntent(intent)
+    P2PSharePlugin.handleIntent(this, intent)
   }
 
   override fun onResume() {

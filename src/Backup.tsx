@@ -1,5 +1,7 @@
 import { useState } from 'react';
 import { api } from './api';
+import { plural } from './format';
+import { tr } from './i18n';
 import { byPlatform } from './platform';
 
 const MIN_PASSWORD = 8;
@@ -21,7 +23,7 @@ export function BackupDialog({ mode, includeChats = false, onClose, onExported }
   const submit = async () => {
     if (!ready || busy) return;
     if (exporting && password !== confirm) {
-      setError('Les deux mots de passe ne sont pas identiques.');
+      setError(tr('Les deux mots de passe ne sont pas identiques.', 'The two passwords do not match.'));
       return;
     }
     setError('');
@@ -52,17 +54,23 @@ export function BackupDialog({ mode, includeChats = false, onClose, onExported }
   return (
     <div className="modal-backdrop" onClick={() => !busy && onClose()}>
       <div className="modal stack" role="dialog" aria-modal="true" onClick={e => e.stopPropagation()}>
-        <div className="modal-title" style={{ marginBottom: 0 }}>{exporting ? 'Exporter une sauvegarde' : 'Restaurer une sauvegarde'}</div>
+        <div className="modal-title" style={{ marginBottom: 0 }}>{exporting ? tr('Exporter une sauvegarde', 'Export a backup') : tr('Restaurer une sauvegarde', 'Restore a backup')}</div>
         <div className="setting-sub">
           {exporting
-            ? `Choisissez un mot de passe (${MIN_PASSWORD} caractères au moins) : il sera demandé pour la restaurer, et ne pourra pas être retrouvé.`
-            : 'Le mot de passe de la sauvegarde, puis le fichier. Votre identité, vos amis et vos réglages actuels seront remplacés, puis l’application redémarrera.'}
+            ? tr(
+              `Choisissez un mot de passe (${MIN_PASSWORD} caractères au moins) : il sera demandé pour la restaurer, et ne pourra pas être retrouvé.`,
+              `Choose a password (at least ${MIN_PASSWORD} characters): it will be asked to restore it, and cannot be recovered.`,
+            )
+            : tr(
+              'Le mot de passe de la sauvegarde, puis le fichier. Votre identité, vos amis et vos réglages actuels seront remplacés, puis l’application redémarrera.',
+              'The backup’s password, then the file. Your current identity, friends and settings will be replaced, then the app will restart.',
+            )}
         </div>
         <input
           className="input"
           type="password"
           autoFocus
-          placeholder="Mot de passe"
+          placeholder={tr('Mot de passe', 'Password')}
           value={password}
           disabled={busy}
           onChange={e => { setPassword(e.target.value); setError(''); }}
@@ -72,7 +80,7 @@ export function BackupDialog({ mode, includeChats = false, onClose, onExported }
           <input
             className="input"
             type="password"
-            placeholder="Confirmer le mot de passe"
+            placeholder={tr('Confirmer le mot de passe', 'Confirm the password')}
             value={confirm}
             disabled={busy}
             onChange={e => { setConfirm(e.target.value); setError(''); }}
@@ -80,14 +88,18 @@ export function BackupDialog({ mode, includeChats = false, onClose, onExported }
           />
         )}
         {exporting && password.length > 0 && password.length < MIN_PASSWORD && (
-          <div className="setting-sub">Encore {MIN_PASSWORD - password.length} caractère{MIN_PASSWORD - password.length > 1 ? 's' : ''}.</div>
+          <div className="setting-sub">
+            {tr('Encore ', '')}{plural(MIN_PASSWORD - password.length, tr('caractère', 'more character'), tr('caractères', 'more characters'))}.
+          </div>
         )}
         {error && <div className="error-text">{error}</div>}
         <div style={{ display: 'flex', gap: 8 }}>
-          <button className="btn btn-secondary" style={{ flex: 1 }} disabled={busy} onClick={onClose}>Annuler</button>
+          <button className="btn btn-secondary" style={{ flex: 1 }} disabled={busy} onClick={onClose}>{tr('Annuler', 'Cancel')}</button>
           <button className="btn" style={{ flex: 1 }} disabled={!ready || busy} onClick={submit}>
             {busy && <span className="spinner" />}
-            {busy ? (exporting ? 'Chiffrement…' : 'Restauration…') : exporting ? 'Choisir le fichier…' : 'Choisir la sauvegarde…'}
+            {busy
+              ? (exporting ? tr('Chiffrement…', 'Encrypting…') : tr('Restauration…', 'Restoring…'))
+              : exporting ? tr('Choisir le fichier…', 'Choose the file…') : tr('Choisir la sauvegarde…', 'Choose the backup…')}
           </button>
         </div>
       </div>
@@ -104,19 +116,25 @@ export function BackupRow() {
   return (
     <div className="stack">
       <div className="setting-sub">
-        Votre identité, vos amis, vos groupes et vos réglages dans un fichier chiffré, pour les retrouver sur un autre {byPlatform('ordinateur', 'appareil')}.
+        {tr(
+          `Votre identité, vos amis, vos groupes et vos réglages dans un fichier chiffré, pour les retrouver sur un autre ${byPlatform('ordinateur', 'appareil')}.`,
+          `Your identity, friends, groups and settings in an encrypted file, to get them back on another ${byPlatform('computer', 'device')}.`,
+        )}
       </div>
       <label className="check-line">
         <input type="checkbox" checked={includeChats} onChange={e => setIncludeChats(e.target.checked)} />
-        Inclure les discussions
+        {tr('Inclure les discussions', 'Include the chats')}
       </label>
       <div style={{ display: 'flex', gap: 8 }}>
-        <button className="btn btn-secondary btn-small" onClick={() => { setSaved(''); setDialog('export'); }}>Exporter…</button>
-        <button className="btn btn-secondary btn-small" onClick={() => setDialog('import')}>Restaurer…</button>
+        <button className="btn btn-secondary btn-small" onClick={() => { setSaved(''); setDialog('export'); }}>{tr('Exporter…', 'Export…')}</button>
+        <button className="btn btn-secondary btn-small" onClick={() => setDialog('import')}>{tr('Restaurer…', 'Restore…')}</button>
       </div>
-      {saved && <div className="setting-sub saved-mark" title={saved}>Sauvegarde enregistrée ✓</div>}
+      {saved && <div className="setting-sub saved-mark" title={saved}>{tr('Sauvegarde enregistrée ✓', 'Backup saved ✓')}</div>}
       <div className="setting-sub warning-text">
-        N’utilisez jamais une même sauvegarde sur deux {byPlatform('ordinateurs', 'appareils')} à la fois : ils auraient le même ID et la même identité LocalSend.
+        {tr(
+          `N’utilisez jamais une même sauvegarde sur deux ${byPlatform('ordinateurs', 'appareils')} à la fois : ils auraient le même ID et la même identité LocalSend.`,
+          `Never use the same backup on two ${byPlatform('computers', 'devices')} at once: they would have the same ID and the same LocalSend identity.`,
+        )}
       </div>
       {dialog && (
         <BackupDialog mode={dialog} includeChats={includeChats} onClose={() => setDialog(null)} onExported={setSaved} />

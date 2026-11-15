@@ -39,6 +39,9 @@ const MAX_CORRUPT: u32 = 5;
 const MAX_SERVES_PER_PEER: usize = 4;
 /// Entries dated further in the future are refused until that time comes.
 const MAX_CLOCK_SKEW_MS: u64 = 5 * 60 * 1000;
+/// A member claiming another version of one of our entries is asked for it
+/// (signed) at most that often per window.
+const FORK_ASK_LIMIT: usize = 4;
 /// Files shared at most from one drop, and how deep folders are walked.
 const MAX_DROP_FILES: usize = 1000;
 const MAX_DROP_DEPTH: usize = 16;
@@ -100,6 +103,11 @@ pub struct Holding {
     /// members, and only while it is listed there.
     #[serde(default)]
     pub groups: Vec<String>,
+    /// The listings ("author/entry id") we shared or downloaded it from: only
+    /// those are served, not one posted again with the same hash after the
+    /// file was removed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<String>,
 }
 
 pub(super) struct GroupState {
@@ -112,6 +120,9 @@ pub(super) struct GroupState {
     /// Our entries dropped because members had other versions of them
     /// (`reset_own_history`): posted again once in sync.
     pub orphans: Vec<group::Entry>,
+    /// While not `own_synced`: members who said they have no entry of ours
+    /// past our last. A friend's word is enough, else two members'.
+    pub sync_votes: HashSet<String>,
 }
 
 impl GroupState {
@@ -122,6 +133,7 @@ impl GroupState {
             unsaved: Vec::new(),
             own_synced,
             orphans: Vec::new(),
+            sync_votes: HashSet::new(),
         }
     }
 }
@@ -311,15 +323,28 @@ fn new_log(dir: &Path, gid: &str) -> Log {
     log
 }
 
-/// Remember that we can serve `hash` (from `path`) in group `gid`.
-fn add_holding(meta: &mut GroupsMeta, hash: String, path: &Path, fs: &std::fs::Metadata, gid: &str) {
-    let mut groups = meta
+/// Remember that we can serve `hash` (from `path`) in group `gid`, for the
+/// listings `files`.
+fn add_holding(
+    meta: &mut GroupsMeta,
+    hash: String,
+    path: &Path,
+    fs: &std::fs::Metadata,
+    gid: &str,
+    files: Vec<String>,
+) {
+    let (mut groups, mut listed) = meta
         .holdings
         .remove(&hash)
-        .map(|h| h.groups)
+        .map(|h| (h.groups, h.files))
         .unwrap_or_default();
     if !groups.iter().any(|g| g == gid) {
         groups.push(gid.to_string());
+    }
+    for file in files {
+        if !listed.contains(&file) {
+            listed.push(file);
+        }
     }
     meta.holdings.insert(
         hash,
@@ -328,6 +353,7 @@ fn add_holding(meta: &mut GroupsMeta, hash: String, path: &Path, fs: &std::fs::M
             size: fs.len(),
             mtime: mtime(fs),
             groups,
+            files: listed,
         },
     );
 }
@@ -562,6 +588,18 @@ pub(super) fn load(dir: &Path) -> (JsonStore<GroupsMeta>, HashMap<String, GroupS
             .collect();
         dirty = true;
     }
+    // Held before holdings named their listings: those listing them now.
+    for (hash, h) in meta.data.holdings.iter_mut().filter(|(_, h)| h.files.is_empty()) {
+        h.files = h
+            .groups
+            .iter()
+            .filter_map(|gid| groups.get(gid))
+            .flat_map(|g| g.log.view.files.values())
+            .filter(|f| f.hash == *hash)
+            .map(|f| f.id.clone())
+            .collect();
+        dirty = true;
+    }
     if dirty {
         meta.mark_dirty();
     }
@@ -569,6 +607,27 @@ pub(super) fn load(dir: &Path) -> (JsonStore<GroupsMeta>, HashMap<String, GroupS
 }
 
 impl State {
+    /// The shared file `hash` and our copy, if `peer` may get it: a member
+    /// of a group we are in and have it from, where it is still listed
+    /// (knowing a hash is not enough), our copy unchanged.
+    pub(super) fn may_serve(&self, peer: &str, hash: &str) -> Option<(group::SharedFile, Holding)> {
+        let holding = self
+            .gmeta
+            .data
+            .holdings
+            .get(hash)
+            .filter(|h| holding_valid(h))?;
+        let file = holding.groups.iter().find_map(|gid| {
+            let g = self.groups.get(gid)?;
+            let ok = self.member_of(gid) && g.log.view.is_member(peer);
+            ok.then(|| {
+                g.log.view.files.values().find(|f| f.hash == hash && holding.files.contains(&f.id)).cloned()
+            })
+            .flatten()
+        })?;
+        Some((file, holding.clone()))
+    }
+
     fn meta(&self, gid: &str) -> Option<&GroupMeta> {
         self.gmeta.data.groups.iter().find(|g| g.id == gid)
     }
@@ -1033,6 +1092,7 @@ impl Node {
         let cut = g.log.truncate(&me, 1);
         g.orphans.extend(cut);
         g.own_synced = false;
+        g.sync_votes.clear();
         g.peer_have.clear();
         g.log.refresh();
         // The texts read back from the file are about to move.
@@ -1203,21 +1263,38 @@ impl Node {
         let ask = msg.get("ask").and_then(Value::as_bool).unwrap_or(false);
         let me = s.me.clone();
         let left = s.is_left(gid);
+        let from_friend = s.is_friend(peer);
         let Some(g) = s.groups.get_mut(gid) else {
             return;
         };
         if !g.log.view.is_member(peer) {
             return;
         }
-        // The peer has another version of one of our entries.
+        // The peer says it has another version of one of our entries. Only
+        // its claim: our history is reset once the signed entry comes (see
+        // `on_group_entries`). Our version of that entry makes it send it.
         let own_head = heads.as_mut().and_then(|h| h.remove(&me));
-        let own_fork = own_head.is_some_and(|hash| {
-            have.get(&me)
-                .and_then(|n| g.log.get(&me, *n))
-                .is_some_and(|e| e.hash != hash)
+        let own_fork = own_head.and_then(|hash| {
+            let n = *have.get(&me)?;
+            let ours = g.log.get(&me, n)?;
+            (ours.hash != hash).then(|| (n, ours.hash.clone()))
         });
-        if own_fork && !left && g.log.fork_of(&me).is_none() {
-            return self.reset_own_history(s, gid);
+        if let Some((n, ours)) = own_fork.filter(|_| !left && g.log.fork_of(&me).is_none()) {
+            let mut claim = g.log.have();
+            claim.insert(me.clone(), n);
+            let mut our_heads = g.log.heads();
+            our_heads.insert(me, ours);
+            let msg = json!({
+                "type": "group_have",
+                "gid": gid,
+                "have": claim,
+                "heads": our_heads,
+                "forks": g.log.forks(),
+            });
+            if !s.over_limit(&format!("group_fork_ask:{peer}"), FORK_ASK_LIMIT) {
+                s.send(peer, msg);
+            }
+            return;
         }
         let acked_before = g
             .peer_have
@@ -1238,9 +1315,18 @@ impl Node {
             .iter()
             .any(|(a, n)| *n > ours.get(a).copied().unwrap_or(0));
         let leave_delivered = left && acked_now >= g.log.last_seq_of(&me);
-        let now_synced = !g.own_synced && acked_now <= g.log.last_seq_of(&me);
+        // One member could claim we have it all to make us number new
+        // entries like old ones: a friend is believed, others by two.
+        let vote = !g.own_synced && acked_now <= g.log.last_seq_of(&me);
+        if vote {
+            g.sync_votes.insert(peer.to_string());
+        }
+        let others = g.log.view.members.keys().filter(|m| **m != me).count();
+        let now_synced = !g.own_synced
+            && ((vote && from_friend) || g.sync_votes.len() >= others.clamp(1, 2));
         if now_synced {
             g.own_synced = true;
+            g.sync_votes.clear();
         }
         g.peer_have.insert(peer.to_string(), have);
 
@@ -1308,8 +1394,6 @@ impl Node {
             return;
         };
         let was_member = g.log.view.is_member(&me);
-        let known_msgs: HashSet<String> =
-            g.log.view.messages.iter().map(|m| m.id.clone()).collect();
         let inserted = g.log.insert_all(entries, true);
         if inserted.kept.is_empty() {
             return;
@@ -1318,10 +1402,20 @@ impl Node {
         // Entries of strangers are neither kept nor passed on.
         g.log.drop_strangers();
         let ever = &g.log.view.ever;
+        // What they bring, to notify its messages only.
+        let mut new_keys: HashSet<(String, u64)> = HashSet::new();
         let new: Vec<SignedEntry> = inserted
             .kept
             .into_iter()
-            .filter(|e| group::parse(e.clone(), &gid, false).is_some_and(|e| ever.contains(&e.a)))
+            .filter(|e| {
+                group::parse(e.clone(), &gid, false).is_some_and(|e| {
+                    let kept = ever.contains(&e.a);
+                    if kept {
+                        new_keys.insert((e.a, e.n));
+                    }
+                    kept
+                })
+            })
             .collect();
         if new.is_empty() {
             return;
@@ -1340,7 +1434,7 @@ impl Node {
             .view
             .messages
             .iter()
-            .filter(|m| m.author != me && !known_msgs.contains(&m.id))
+            .filter(|m| m.author != me && new_keys.contains(&(m.author.clone(), m.seq)))
             .cloned()
             .collect();
 
@@ -1471,7 +1565,7 @@ impl Node {
                         .iter()
                         .find(|f| f.id == i.from)
                         .map(Friend::display_name)
-                        .unwrap_or_else(|| "Un ami".into()),
+                        .unwrap_or_else(|| crate::lang::tr("Un ami", "A friend").into()),
                 })
                 .collect();
             GroupsOverview { groups, invites }
@@ -1902,9 +1996,10 @@ impl Node {
                 if !s.member_of(gid) || !s.can_post(gid) {
                     return false;
                 }
-                add_holding(&mut s.gmeta.data, hash.clone(), &path, &meta, gid);
-                s.gmeta.mark_dirty();
                 let id = hex::encode(rand::random::<[u8; 8]>());
+                let listing = format!("{}/{id}", s.me);
+                add_holding(&mut s.gmeta.data, hash.clone(), &path, &meta, gid, vec![listing]);
+                s.gmeta.mark_dirty();
                 self.post(
                     s,
                     gid,
@@ -2040,7 +2135,7 @@ impl Node {
             });
             let tid = hex::encode(rand::random::<[u8; TID_BYTES]>());
             let (part, file) =
-                create_part(&dir, &f.name).map_err(|_| "Dossier de téléchargement inaccessible")?;
+                create_part(&dir, &f.name).map_err(|_| crate::lang::tr("Dossier de téléchargement inaccessible", "Download folder not reachable"))?;
             s.add_transfer(
                 tid.clone(),
                 Dir::In,
@@ -2139,7 +2234,7 @@ impl Node {
                 s.set_status(
                     tid,
                     Status::Paused,
-                    Some("En attente d’un membre qui a ce fichier".into()),
+                    Some(crate::lang::tr("En attente d’un membre qui a ce fichier", "Waiting for a member who has this file").into()),
                 );
             }
         }
@@ -2168,7 +2263,7 @@ impl Node {
                     s,
                     &tid,
                     Status::Error,
-                    Some("Ce fichier n’est plus partagé dans le groupe".into()),
+                    Some(crate::lang::tr("Ce fichier n’est plus partagé dans le groupe", "This file is no longer shared in the group").into()),
                 );
             }
         }
@@ -2213,23 +2308,7 @@ impl Node {
             .unwrap_or("")
             .to_lowercase();
         let offset = msg.get("offset").and_then(Value::as_u64).unwrap_or(0);
-        let holding = s
-            .gmeta
-            .data
-            .holdings
-            .get(&hash)
-            .filter(|h| holding_valid(h))
-            .cloned();
-        // Only to members of a group we have it from, where it is still
-        // listed: knowing a hash is not enough to get the file.
-        let listed = holding.as_ref().and_then(|h| {
-            h.groups.iter().find_map(|gid| {
-                let g = s.groups.get(gid)?;
-                let ok = s.member_of(gid) && g.log.view.is_member(peer);
-                ok.then(|| g.log.view.files.values().find(|f| f.hash == hash).cloned())
-                    .flatten()
-            })
-        });
+        let (listed, holding) = s.may_serve(peer, &hash).unzip();
         let serving = s
             .transfers
             .values()
@@ -2260,6 +2339,7 @@ impl Node {
         );
         let t = s.transfers.get_mut(tid).unwrap();
         t.serve = true;
+        t.serve_hash = Some(hash);
         t.hidden = true;
         t.src_path = Some(holding.path);
         self.on_accept(s, peer, conn_id, &json!({ "tid": tid, "offset": offset }));
@@ -2330,7 +2410,7 @@ impl Node {
             s.set_status(
                 tid,
                 Status::Paused,
-                Some("Copie corrompue reçue : nouvelle tentative".into()),
+                Some(crate::lang::tr("Copie corrompue reçue : nouvelle tentative", "Damaged copy received: trying again").into()),
             );
             self.pick_source(s, tid);
         });
@@ -2345,7 +2425,11 @@ impl Node {
             return;
         };
         let (gid, hash) = (repo.gid.clone(), repo.hash.clone());
-        add_holding(&mut s.gmeta.data, hash, target, &meta, &gid);
+        // The listings it was downloaded for.
+        let files = s.groups.get(&gid).map_or_else(Vec::new, |g| {
+            g.log.view.files.values().filter(|f| f.hash == hash).map(|f| f.id.clone()).collect()
+        });
+        add_holding(&mut s.gmeta.data, hash, target, &meta, &gid, files);
         s.gmeta.mark_dirty();
         s.events.push(Event::GroupUpdate { gid });
     }

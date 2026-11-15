@@ -146,7 +146,7 @@ async fn main() {
     let a = pa.start().await;
     assert!(a.messages(&pb.id()).iter().any(|m| m.text == "pendant ton absence"));
     println!("  ok  A redémarré, message en attente conservé");
-    assert_eq!(a.send_files(&pb.id(), &[file.clone()]), 1);
+    assert_eq!(a.send_files(&pb.id(), std::slice::from_ref(&file)), 1);
     println!("     B hors ligne {}s…", OFFLINE.as_secs());
     tokio::time::sleep(OFFLINE).await;
     let back = Instant::now();
@@ -207,7 +207,7 @@ async fn main() {
     let big = work.join("gros.bin");
     let big_data = data(400 << 20, 7);
     std::fs::write(&big, &big_data).unwrap();
-    a.send_files(&pb.id(), &[big.clone()]);
+    a.send_files(&pb.id(), std::slice::from_ref(&big));
     let incoming = |n: &Node| transfer(n, |t| t.dir == Dir::In && t.file_name == "gros.bin");
     wait("B reçoit l'offre", || incoming(&b).is_some()).await;
     accept_all(&b);
@@ -233,7 +233,7 @@ async fn main() {
     println!("4. Annulation faite hors ligne");
     let big2 = work.join("gros2.bin");
     std::fs::write(&big2, &big_data[..200 << 20]).unwrap();
-    a.send_files(&pb.id(), &[big2.clone()]);
+    a.send_files(&pb.id(), std::slice::from_ref(&big2));
     let incoming2 = |n: &Node| transfer(n, |t| t.dir == Dir::In && t.file_name == "gros2.bin");
     wait("B reçoit l'offre", || incoming2(&b).is_some()).await;
     accept_all(&b);
@@ -381,7 +381,7 @@ async fn features(work: &Path, (pa, a): (&Peer, &Node), (pb, b): (&Peer, &Node))
     let big = work.join("limite.bin");
     let big_data = data(24 << 20, 9);
     std::fs::write(&big, &big_data).unwrap();
-    a.send_files(&idb, &[big.clone()]);
+    a.send_files(&idb, std::slice::from_ref(&big));
     let incoming = |n: &Node| transfer(n, |t| t.dir == Dir::In && t.file_name == "limite.bin");
     let outgoing = |n: &Node| transfer(n, |t| t.dir == Dir::Out && t.file_name == "limite.bin");
     wait("B reçoit l'offre", || incoming(b).is_some()).await;

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api } from './api';
+import { tr } from './i18n';
 import { Icon } from './icons';
 import { isMobile } from './platform';
 
@@ -20,7 +21,9 @@ export function PinButton() {
   return (
     <button
       className={`icon-btn ${pinned ? 'active' : ''}`}
-      title={pinned ? 'Ne plus garder ouvert' : 'Garder ouvert au premier plan (pour y glisser des fichiers)'}
+      title={pinned
+        ? tr('Ne plus garder ouvert', 'Stop keeping open')
+        : tr('Garder ouvert au premier plan (pour y glisser des fichiers)', 'Keep open on top (to drop files into it)')}
       aria-pressed={pinned}
       onClick={toggle}
     >
@@ -31,7 +34,7 @@ export function PinButton() {
 
 // Hides the flyout (back to the tray).
 export function HideButton() {
-  return <button className="icon-btn" title="Masquer" onClick={() => api.hideWindow()}><Icon name="close" /></button>;
+  return <button className="icon-btn" title={tr('Masquer', 'Hide')} onClick={() => api.hideWindow()}><Icon name="close" /></button>;
 }
 
 // The flyout's own buttons, at the end of each header: none on a phone,

@@ -95,6 +95,10 @@ jobs:
     env:
       # Only given to version tags: it signs the updates (see update.rs).
       UPDATER_KEY: ${{ startsWith(github.ref, 'refs/tags/v') && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
+      # One macOS app for Apple Silicon and Intel (universal), built in a
+      # folder of its own.
+      BUNDLE: src-tauri/target/${{ startsWith(matrix.os, 'macos') && 'universal-apple-darwin/' || '' }}release/bundle
+      TARGET_ARGS: ${{ startsWith(matrix.os, 'macos') && '--target universal-apple-darwin' || '' }}
 
     steps:
       - name: Check out git repository
@@ -114,6 +118,8 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          targets: ${{ startsWith(matrix.os, 'macos') && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
 
       - name: Cache Rust build
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
@@ -167,7 +173,7 @@ jobs:
       - name: Build installers
         if: steps.sign.outputs.enabled != 'true'
         # Arguments after -- go to cargo build.
-        run: npx tauri build -- --locked
+        run: npx tauri build ${{ env.TARGET_ARGS }} -- --locked
 
       # Signed: the app first, so that the installer carries the signed exe,
       # then the installer itself.
@@ -235,7 +241,7 @@ jobs:
       - name: Pack the macOS update
         if: runner.os == 'macOS'
         run: |
-          b=src-tauri/target/release/bundle
+          b=$BUNDLE
           name=$(basename "$(ls $b/dmg/*.dmg)" .dmg)
           # No ._ files for extended attributes: they would land in the
           # installed app and break its signature.
@@ -247,9 +253,9 @@ jobs:
           codesign --verify --deep --strict "$RUNNER_TEMP/unpacked/P2PShare.app"
           ls -l "$b/macos/$name.app.tar.gz"
 
-      # What the app's updater downloads, each with its .sig: the installer
-      # (after SignPath, when signed), the AppImage and the .deb, the app in
-      # a .tar.gz.
+      # What the app's updater downloads, each signed in a .sig copied into
+      # latest.json: the installer (after SignPath, when signed), the
+      # AppImage and the .deb, the app in a .tar.gz.
       - name: Sign the update
         if: env.UPDATER_KEY != ''
         shell: bash
@@ -258,7 +264,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           VERSION: ${{ needs.version.outputs.version }}
         run: |
-          b=src-tauri/target/release/bundle
+          b=$BUNDLE
           case "$RUNNER_OS" in
             Windows) files=$(ls $b/nsis/*-setup.exe) ;;
             Linux) files=$(ls $b/appimage/*.AppImage $b/deb/*.deb) ;;
@@ -274,15 +280,15 @@ jobs:
         with:
           name: P2PShare-${{ matrix.os }}
           path: |
-            src-tauri/target/release/bundle/nsis/*.exe
-            src-tauri/target/release/bundle/nsis/*.sig
-            src-tauri/target/release/bundle/dmg/*.dmg
-            src-tauri/target/release/bundle/macos/*.app.tar.gz
-            src-tauri/target/release/bundle/macos/*.sig
-            src-tauri/target/release/bundle/appimage/*.AppImage
-            src-tauri/target/release/bundle/appimage/*.sig
-            src-tauri/target/release/bundle/deb/*.deb
-            src-tauri/target/release/bundle/deb/*.sig
+            ${{ env.BUNDLE }}/nsis/*.exe
+            ${{ env.BUNDLE }}/nsis/*.sig
+            ${{ env.BUNDLE }}/dmg/*.dmg
+            ${{ env.BUNDLE }}/macos/*.app.tar.gz
+            ${{ env.BUNDLE }}/macos/*.sig
+            ${{ env.BUNDLE }}/appimage/*.AppImage
+            ${{ env.BUNDLE }}/appimage/*.sig
+            ${{ env.BUNDLE }}/deb/*.deb
+            ${{ env.BUNDLE }}/deb/*.sig
           if-no-files-found: error
 
   android:
@@ -423,7 +429,7 @@ jobs:
           Téléchargez l'installeur correspondant à votre système :
 
           - **Windows** : `P2PShare_*_x64-setup.exe`
-          - **macOS** (Apple Silicon) : `P2PShare_*_aarch64.dmg`
+          - **macOS** (Apple Silicon et Intel) : `P2PShare_*_universal.dmg`
           - **Linux** : `P2PShare_*_amd64.AppImage`, ou `P2PShare_*_amd64.deb` pour Debian et Ubuntu
           - **Android** (arm64) : `P2PShare_*_android-arm64.apk`, si présent
 
@@ -469,7 +475,9 @@ jobs:
           tag, repo = os.environ['TAG'], os.environ['REPO']
           platforms = {}
           for target, pattern in [('windows-x86_64', '*-setup.exe'),
+                                  # The same universal app for both Macs.
                                   ('darwin-aarch64', '*.app.tar.gz'),
+                                  ('darwin-x86_64', '*.app.tar.gz'),
                                   ('linux-x86_64', '*.AppImage'),
                                   # Looked for first by an app installed from the .deb.
                                   ('linux-x86_64-deb', '*.deb')]:
@@ -488,6 +496,14 @@ jobs:
               'pub_date': datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
               'platforms': platforms,
           }
+          # Android's app reads it (update.rs); not in "platforms", whose
+          # entries the desktop updater requires signed. Android checks the
+          # APK's own signature against the app installed.
+          apks = glob.glob('artifacts/**/*.apk', recursive=True)
+          if len(apks) == 1:
+              latest['android'] = {
+                  'url': f'https://github.com/{repo}/releases/download/{tag}/{os.path.basename(apks[0])}',
+              }
           json.dump(latest, open('artifacts/latest.json', 'w'), indent=2)
           print(json.dumps(latest, indent=2))
           PY
@@ -503,10 +519,10 @@ jobs:
             echo 'artifacts/**/*.AppImage'
             echo 'artifacts/**/*.deb'
             if [ -n "$(find artifacts -name '*.apk')" ]; then echo 'artifacts/**/*.apk'; fi
-            # latest.json comes after the release is complete (below).
+            # latest.json comes after the release is complete (below). The
+            # .sig files are not published: their signatures are in it.
             if [ -f artifacts/latest.json ]; then
               echo 'artifacts/**/*.app.tar.gz'
-              echo 'artifacts/**/*.sig'
             fi
             echo 'artifacts/SHA256SUMS.txt'
             echo EOF

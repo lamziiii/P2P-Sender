@@ -1,5 +1,6 @@
 import { useEffect, useRef, useSyncExternalStore } from 'react';
 import type { MouseEvent, TouchEvent } from 'react';
+import { tr } from './i18n';
 
 // A phone or tablet (the Android app): full screen, touch, no tray window.
 // Everything that differs from the desktop flyout depends on this.
@@ -8,11 +9,14 @@ export const isMobile = /Android|iPhone|iPad/i.test(navigator.userAgent);
 // macOS: a menu bar instead of a notification area.
 export const isMac = !isMobile && /Macintosh|Mac OS X/i.test(navigator.userAgent);
 
+export const isWindows = !isMobile && /Windows/i.test(navigator.userAgent);
+export const isLinux = !isMobile && !isMac && !isWindows;
+
 // The same sentence for the desktop or the phone.
 export const byPlatform = <T>(desktop: T, mobile: T): T => (isMobile ? mobile : desktop);
 
 // Where received files go on Android (no folder to pick).
-export const MOBILE_DOWNLOADS = 'Téléchargements/P2PShare';
+export const MOBILE_DOWNLOADS = tr('Téléchargements/P2PShare', 'Download/P2PShare');
 
 if (isMobile) {
   const root = document.documentElement;

@@ -56,14 +56,14 @@ class P2PShareService : Service() {
       if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
       val manager = context.getSystemService(NotificationManager::class.java) ?: return
       manager.createNotificationChannel(
-        NotificationChannel(CHANNEL_SERVICE, "Fonctionnement en arrière-plan", NotificationManager.IMPORTANCE_MIN).apply {
-          description = "Indique que P2P Share reste joignable quand l'application est fermée."
+        NotificationChannel(CHANNEL_SERVICE, Lang.tr(context, "Fonctionnement en arrière-plan", "Running in the background"), NotificationManager.IMPORTANCE_MIN).apply {
+          description = Lang.tr(context, "Indique que P2P Share reste joignable quand l'application est fermée.", "Shows that P2P Share stays reachable when the app is closed.")
           setShowBadge(false)
         }
       )
       manager.createNotificationChannel(
-        NotificationChannel(CHANNEL_EVENTS, "Messages et fichiers", NotificationManager.IMPORTANCE_HIGH).apply {
-          description = "Messages, fichiers reçus et activité des groupes."
+        NotificationChannel(CHANNEL_EVENTS, Lang.tr(context, "Messages et fichiers", "Messages and files"), NotificationManager.IMPORTANCE_HIGH).apply {
+          description = Lang.tr(context, "Messages, fichiers reçus et activité des groupes.", "Messages, received files and group activity.")
         }
       )
     }
@@ -80,8 +80,8 @@ class P2PShareService : Service() {
     )
     val notification = NotificationCompat.Builder(this, CHANNEL_SERVICE)
       .setSmallIcon(R.drawable.ic_notification)
-      .setContentTitle("P2P Share est actif")
-      .setContentText("Vos amis et les appareils LocalSend peuvent vous joindre.")
+      .setContentTitle(Lang.tr(this, "P2P Share est actif", "P2P Share is running"))
+      .setContentText(Lang.tr(this, "Vos amis et les appareils LocalSend peuvent vous joindre.", "Your friends and LocalSend devices can reach you."))
       .setContentIntent(open)
       .setOngoing(true)
       .setShowWhen(false)

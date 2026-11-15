@@ -132,18 +132,20 @@ fn mime_type(name: &str) -> &'static str {
 
 fn unreachable(e: &io::Error) -> String {
     match e.kind() {
-        io::ErrorKind::TimedOut => "Appareil injoignable (délai dépassé)".into(),
-        io::ErrorKind::ConnectionRefused => "Appareil injoignable (LocalSend fermé ?)".into(),
-        _ => format!("Connexion à l’appareil impossible : {e}"),
+        io::ErrorKind::TimedOut => crate::lang::tr("Appareil injoignable (délai dépassé)", "Device unreachable (timed out)").into(),
+        io::ErrorKind::ConnectionRefused => {
+            crate::lang::tr("Appareil injoignable (LocalSend fermé ?)", "Device unreachable (LocalSend closed?)").into()
+        }
+        _ => crate::trf!("Connexion à l’appareil impossible : {e}", "Could not connect to the device: {e}"),
     }
 }
 
 fn refusal(status: StatusCode) -> String {
     match status.as_u16() {
-        401 => "L’appareil demande un code PIN (non pris en charge)".into(),
-        409 => "L’appareil est occupé par un autre transfert".into(),
-        429 => "Trop de demandes : réessayez dans un moment".into(),
-        code => format!("Refusé par l’appareil (erreur {code})"),
+        401 => crate::lang::tr("L’appareil demande un code PIN (non pris en charge)", "The device asks for a PIN (not supported)").into(),
+        409 => crate::lang::tr("L’appareil est occupé par un autre transfert", "The device is busy with another transfer").into(),
+        429 => crate::lang::tr("Trop de demandes : réessayez dans un moment", "Too many requests: try again in a moment").into(),
+        code => crate::trf!("Refusé par l’appareil (erreur {code})", "Refused by the device (error {code})"),
     }
 }
 
@@ -272,7 +274,7 @@ impl Inner {
             node: self.node.clone(),
             tids: tids.clone(),
             status: Status::Cancelled,
-            error: "LocalSend désactivé",
+            error: crate::lang::tr("LocalSend désactivé", "LocalSend is off"),
             armed: true,
         };
         let Some(device) = self.resolve(target).await else {
@@ -280,7 +282,7 @@ impl Inner {
                 self.node.external_stop(
                     tid,
                     Status::Error,
-                    Some("Appareil introuvable : est-il allumé, avec LocalSend ouvert ?"),
+                    Some(crate::lang::tr("Appareil introuvable : est-il allumé, avec LocalSend ouvert ?", "Device not found: is it on, with LocalSend open?")),
                 );
             }
             return;
@@ -322,7 +324,7 @@ impl Inner {
         let reply = match answer {
             Ok((StatusCode::OK, body, _)) => match serde_json::from_slice::<PrepareReply>(&body) {
                 Ok(reply) => reply,
-                Err(_) => return stop_all(Status::Error, Some("Réponse invalide de l’appareil")),
+                Err(_) => return stop_all(Status::Error, Some(crate::lang::tr("Réponse invalide de l’appareil", "Invalid answer from the device"))),
             },
             // Nothing to transfer: the device already has everything.
             Ok((StatusCode::NO_CONTENT, ..)) => {
@@ -334,7 +336,7 @@ impl Inner {
             Ok((StatusCode::FORBIDDEN, ..)) => return stop_all(Status::Declined, None),
             Ok((status, ..)) => return stop_all(Status::Error, Some(&refusal(status))),
             Err(e) if e.kind() == io::ErrorKind::TimedOut => {
-                return stop_all(Status::Error, Some("Pas de réponse de l’appareil"))
+                return stop_all(Status::Error, Some(crate::lang::tr("Pas de réponse de l’appareil", "No answer from the device")))
             }
             Err(e) => return stop_all(Status::Error, Some(&unreachable(&e))),
         };
@@ -377,27 +379,27 @@ impl Inner {
                     self.node.external_stop(
                         &file.tid,
                         Status::Error,
-                        Some("L’appareil ne répond plus"),
+                        Some(crate::lang::tr("L’appareil ne répond plus", "The device no longer answers")),
                     );
                     continue;
                 }
             };
             let failure = match result {
-                (Err(_), _) => Some((Status::Error, "Lecture du fichier impossible".to_string())),
+                (Err(_), _) => Some((Status::Error, crate::lang::tr("Lecture du fichier impossible", "Could not read the file").to_string())),
                 (_, Ok((StatusCode::OK, ..))) => None,
                 (_, Ok((StatusCode::FORBIDDEN | StatusCode::CONFLICT, ..))) => {
-                    Some((Status::Cancelled, "Annulé par le destinataire".to_string()))
+                    Some((Status::Cancelled, crate::lang::tr("Annulé par le destinataire", "Cancelled by the recipient").to_string()))
                 }
                 (_, Ok((StatusCode::UNPROCESSABLE_ENTITY, ..))) => {
                     Some((Status::Error, "Fichier corrompu en route".to_string()))
                 }
                 (_, Ok((status, ..))) => Some((
                     Status::Error,
-                    format!("Erreur de l’appareil (erreur {})", status.as_u16()),
+                    crate::trf!("Erreur de l’appareil (erreur {})", "Device error (error {})", status.as_u16()),
                 )),
                 (_, Err(_)) => Some((
                     Status::Error,
-                    "Connexion perdue avec l’appareil".to_string(),
+                    crate::lang::tr("Connexion perdue avec l’appareil", "Connection to the device lost").to_string(),
                 )),
             };
             match failure {
@@ -432,17 +434,17 @@ impl Inner {
         let prepare = self.request(&peer, &path, "application/json", body);
         let answer = tokio::time::timeout(DECISION_TIMEOUT, prepare)
             .await
-            .map_err(|_| "Pas de réponse de l’appareil".to_string())?;
+            .map_err(|_| crate::lang::tr("Pas de réponse de l’appareil", "No answer from the device").to_string())?;
         let reply = match answer {
             Ok((StatusCode::NO_CONTENT, ..)) => return Ok(()),
             Ok((StatusCode::OK, body, _)) => serde_json::from_slice::<PrepareReply>(&body)
-                .map_err(|_| "Réponse invalide de l’appareil".to_string())?,
-            Ok((StatusCode::FORBIDDEN, ..)) => return Err("Refusé par l’appareil".into()),
+                .map_err(|_| crate::lang::tr("Réponse invalide de l’appareil", "Invalid answer from the device").to_string())?,
+            Ok((StatusCode::FORBIDDEN, ..)) => return Err(crate::lang::tr("Refusé par l’appareil", "Refused by the device").into()),
             Ok((status, ..)) => return Err(refusal(status)),
             Err(e) => return Err(unreachable(&e)),
         };
         let Some(token) = reply.files.get(&id) else {
-            return Err("Refusé par l’appareil".into());
+            return Err(crate::lang::tr("Refusé par l’appareil", "Refused by the device").into());
         };
         let path = format!(
             "{API}/upload?{}",
@@ -457,10 +459,10 @@ impl Inner {
         match tokio::time::timeout(IDLE_TIMEOUT, upload).await {
             Ok(Ok((StatusCode::OK, ..))) => Ok(()),
             Ok(Ok((status, ..))) => {
-                Err(format!("Erreur de l’appareil (erreur {})", status.as_u16()))
+                Err(crate::trf!("Erreur de l’appareil (erreur {})", "Device error (error {})", status.as_u16()))
             }
             Ok(Err(e)) => Err(unreachable(&e)),
-            Err(_) => Err("L’appareil ne répond plus".into()),
+            Err(_) => Err(crate::lang::tr("L’appareil ne répond plus", "The device no longer answers").into()),
         }
     }
 

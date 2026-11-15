@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { api } from './api';
 import type { LocalSendChat, LocalSendDevice, NotifySettings } from './api';
 import { formatDate } from './format';
+import { tr } from './i18n';
 import { Icon } from './icons';
 import { byPlatform, fitOnScreen } from './platform';
 
@@ -97,7 +98,7 @@ export function LocalSendDevices({ dropTarget, onSent, onOpenChat, muted, onMute
   const present = new Set(shown.map(r => r.fingerprint));
   const absent: Row[] = chats
     .filter(c => !present.has(c.fingerprint))
-    .map(c => ({ fingerprint: c.fingerprint, name: c.alias || 'Appareil LocalSend', chat: c }));
+    .map(c => ({ fingerprint: c.fingerprint, name: c.alias || tr('Appareil LocalSend', 'LocalSend device'), chat: c }));
 
   const row = (r: Row) => {
     const { device, chat } = r;
@@ -106,7 +107,7 @@ export function LocalSendDevices({ dropTarget, onSent, onOpenChat, muted, onMute
     const last = chat?.lastText;
     const preview = device
       ? last ?? device.deviceModel ?? 'LocalSend'
-      : `Hors réseau${last ? ` · ${last}` : ''}`;
+      : `${tr('Hors réseau', 'Not on the network')}${last ? ` · ${last}` : ''}`;
     return (
       <div
         key={r.fingerprint}
@@ -124,26 +125,26 @@ export function LocalSendDevices({ dropTarget, onSent, onOpenChat, muted, onMute
           <div className="row-top">
             <span className={`item-title ${count > 0 ? 'unread' : ''}`}>
               {r.name}
-              {isMuted && <span className="muted-mark" title="Notifications désactivées"><Icon name="bellOff" size={12} /></span>}
+              {isMuted && <span className="muted-mark" title={tr('Notifications désactivées', 'Notifications off')}><Icon name="bellOff" size={12} /></span>}
             </span>
             {chat && chat.lastTs > 0 && <span className="item-time">{formatDate(chat.lastTs)}</span>}
           </div>
           <div className="row-top">
             <span className={`item-sub ellipsis ${count > 0 ? 'unread' : ''}`}>
               {preview}
-              {device && !device.secure && <span style={{ color: 'var(--danger)' }} title="Ancienne version de LocalSend : les fichiers passent en clair sur le réseau, et rien ne prouve que c’est bien cet appareil."> · non chiffré</span>}
+              {device && !device.secure && <span style={{ color: 'var(--danger)' }} title={tr('Ancienne version de LocalSend : les fichiers passent en clair sur le réseau, et rien ne prouve que c’est bien cet appareil.', 'Older LocalSend: files go unencrypted over the network, and nothing proves it is this device.')}>{tr(' · non chiffré', ' · not encrypted')}</span>}
             </span>
-            {count > 0 && <span className="badge" title="Messages non lus">{count}</span>}
+            {count > 0 && <span className="badge" title={tr('Messages non lus', 'Unread messages')}>{count}</span>}
           </div>
         </div>
         <div className="item-actions" onClick={e => e.stopPropagation()}>
           {device && (
-            <button className="icon-btn" title="Envoyer des fichiers" onClick={() => send(r.fingerprint)}><Icon name="fileUp" /></button>
+            <button className="icon-btn" title={tr('Envoyer des fichiers', 'Send files')} onClick={() => send(r.fingerprint)}><Icon name="fileUp" /></button>
           )}
           <div className="menu-anchor">
             <button
               className="icon-btn"
-              title="Plus d’options"
+              title={tr('Plus d’options', 'More options')}
               onClick={e => {
                 e.stopPropagation();
                 const b = e.currentTarget.getBoundingClientRect();
@@ -160,11 +161,11 @@ export function LocalSendDevices({ dropTarget, onSent, onOpenChat, muted, onMute
                   onClick={async () => { setMenu(null); onMuted(await api.setChatMuted('localsend', r.fingerprint, !isMuted)); }}
                 >
                   <span className="menu-check">{isMuted && <Icon name="check" size={14} />}</span>
-                  Désactiver les notifications
+                  {tr('Désactiver les notifications', 'Turn off notifications')}
                 </button>
                 {chat && (
                   <button role="menuitem" className="danger" onClick={() => { setMenu(null); setDeleting(r); }}>
-                    <Icon name="trash" size={14} />Supprimer la discussion
+                    <Icon name="trash" size={14} />{tr('Supprimer la discussion', 'Delete the chat')}
                   </button>
                 )}
               </div>
@@ -178,15 +179,17 @@ export function LocalSendDevices({ dropTarget, onSent, onOpenChat, muted, onMute
   return (
     <>
       <div className="section-header section-header-row">
-        <span>À proximité (LocalSend){shown.length > 0 ? ` · ${shown.length}` : ''}</span>
-        <button className="icon-btn small" title="Rechercher à nouveau" disabled={scanning} onClick={scan}>
+        <span>{tr('À proximité (LocalSend)', 'Nearby (LocalSend)')}{shown.length > 0 ? ` · ${shown.length}` : ''}</span>
+        <button className="icon-btn small" title={tr('Rechercher à nouveau', 'Search again')} disabled={scanning} onClick={scan}>
           <Icon name="sync" size={14} />
         </button>
       </div>
       {shown.length > 0 && <div className="list">{shown.map(row)}</div>}
       {shown.length === 0 && (
         <div className="setting-sub" style={{ padding: '0 2px' }}>
-          {scanning ? 'Recherche…' : 'Aucun appareil. Ouvrez LocalSend sur l’appareil (même Wi-Fi), puis relancez la recherche.'}
+          {scanning
+            ? tr('Recherche…', 'Searching…')
+            : tr('Aucun appareil. Ouvrez LocalSend sur l’appareil (même Wi-Fi), puis relancez la recherche.', 'No devices. Open LocalSend on the device (same Wi-Fi), then search again.')}
         </div>
       )}
       {absent.length > 0 && <div className="list">{absent.map(row)}</div>}
@@ -195,13 +198,16 @@ export function LocalSendDevices({ dropTarget, onSent, onOpenChat, muted, onMute
       {deleting && (
         <div className="modal-backdrop" onClick={() => setDeleting(null)}>
           <div className="modal" role="dialog" aria-modal="true" onClick={e => e.stopPropagation()}>
-            <div className="modal-title">Supprimer la discussion avec {deleting.name} ?</div>
+            <div className="modal-title">{tr(`Supprimer la discussion avec ${deleting.name} ?`, `Delete the chat with ${deleting.name}?`)}</div>
             <div className="modal-text">
-              Les messages sont effacés de cet {byPlatform('ordinateur', 'appareil')}. Ceux de l’app LocalSend, sur l’autre appareil, n’y sont pas effacés.
+              {tr(
+                `Les messages sont effacés de cet ${byPlatform('ordinateur', 'appareil')}. Ceux de l’app LocalSend, sur l’autre appareil, n’y sont pas effacés.`,
+                `The messages are deleted from this ${byPlatform('computer', 'device')}. Those in the LocalSend app, on the other device, are not.`,
+              )}
             </div>
             <div style={{ display: 'flex', gap: 8 }}>
-              <button className="btn btn-secondary" style={{ flex: 1 }} autoFocus onClick={() => setDeleting(null)}>Annuler</button>
-              <button className="btn btn-danger" style={{ flex: 1 }} onClick={() => remove(deleting.fingerprint)}>Supprimer</button>
+              <button className="btn btn-secondary" style={{ flex: 1 }} autoFocus onClick={() => setDeleting(null)}>{tr('Annuler', 'Cancel')}</button>
+              <button className="btn btn-danger" style={{ flex: 1 }} onClick={() => remove(deleting.fingerprint)}>{tr('Supprimer', 'Delete')}</button>
             </div>
           </div>
         </div>

@@ -43,24 +43,31 @@
 <body>
 <main>
   <div id="invite" hidden>
-    <h1 id="title">Invitation P2P Share</h1>
-    <p id="text">Ouverture de P2P Share… Votre ami y sera ajouté : vous pourrez discuter et vous envoyer des fichiers, directement.</p>
-    <p id="missing" hidden>P2P Share ne s’est pas ouvert ? Installez-le, puis revenez sur ce lien.</p>
-    <a class="btn" id="install" href="https://github.com/lamziiii/P2P-Sender/releases/latest" hidden>Installer P2P Share</a>
-    <a class="btn secondary" id="open" href="#">Ouvrir dans P2P Share</a>
+    <h1 id="title" data-en="P2P Share invitation">Invitation P2P Share</h1>
+    <p id="text" data-en="Opening P2P Share… Your friend will be added there: you will chat and send each other files, directly.">Ouverture de P2P Share… Votre ami y sera ajouté : vous pourrez discuter et vous envoyer des fichiers, directement.</p>
+    <p id="missing" hidden data-en="P2P Share did not open? Install it, then come back to this link.">P2P Share ne s’est pas ouvert ? Installez-le, puis revenez sur ce lien.</p>
+    <a class="btn" id="install" href="https://github.com/lamziiii/P2P-Sender/releases/latest" hidden data-en="Install P2P Share">Installer P2P Share</a>
+    <a class="btn secondary" id="open" href="#" data-en="Open in P2P Share">Ouvrir dans P2P Share</a>
     <div class="note">
-      <p>P2P Share est installé mais ne s’ouvre pas ? Il lui faut la version 3.4.6 ou plus. Ou copiez le lien et collez-le dans l’app : onglet Amis (bouton + si vous avez déjà des amis), « Vous avez reçu un lien ? ».</p>
-      <button class="btn secondary" id="copy" type="button">Copier le lien</button>
+      <p data-en="P2P Share is installed but does not open? It needs version 3.4.6 or later. Or copy the link and paste it in the app: Friends tab (+ button if you already have friends), “Received a link?”.">P2P Share est installé mais ne s’ouvre pas ? Il lui faut la version 3.4.6 ou plus. Ou copiez le lien et collez-le dans l’app : onglet Amis (bouton + si vous avez déjà des amis), « Vous avez reçu un lien ? ».</p>
+      <button class="btn secondary" id="copy" type="button" data-en="Copy the link">Copier le lien</button>
     </div>
   </div>
   <div id="none" hidden>
-    <h1>Lien incomplet</h1>
-    <p>Ce lien d’invitation P2P Share est incomplet. Demandez à votre ami de vous le renvoyer en entier.</p>
-    <a class="btn secondary" href="https://github.com/lamziiii/P2P-Sender">Découvrir P2P Share</a>
+    <h1 data-en="Incomplete link">Lien incomplet</h1>
+    <p data-en="This P2P Share invitation link is incomplete. Ask your friend to send it to you again in full.">Ce lien d’invitation P2P Share est incomplet. Demandez à votre ami de vous le renvoyer en entier.</p>
+    <a class="btn secondary" href="https://github.com/lamziiii/P2P-Sender" data-en="Discover P2P Share">Découvrir P2P Share</a>
   </div>
 </main>
 <script>
   (function () {
+    // French for a French browser, English otherwise (as the app).
+    var en = !/^fr/i.test(navigator.language || '');
+    if (en) {
+      document.documentElement.lang = 'en';
+      document.title = 'P2P Share invitation';
+      document.querySelectorAll('[data-en]').forEach(function (el) { el.textContent = el.getAttribute('data-en'); });
+    }
     var payload = location.hash.replace(/^#/, '');
     var params = new URLSearchParams(payload);
     if (!/^[0-9a-f]{64}$/i.test(params.get('i') || '') || !/^[0-9a-f]{32}$/i.test(params.get('c') || '')) {
@@ -69,8 +76,8 @@
     }
     var name = (params.get('n') || '').trim().slice(0, 40);
     if (name) {
-      document.getElementById('title').textContent = name + ' vous invite sur P2P Share';
-      document.title = 'Invitation de ' + name + ' · P2P Share';
+      document.getElementById('title').textContent = en ? name + ' invites you to P2P Share' : name + ' vous invite sur P2P Share';
+      document.title = en ? 'Invitation from ' + name + ' · P2P Share' : 'Invitation de ' + name + ' · P2P Share';
     }
     document.getElementById('invite').hidden = false;
     var app = 'p2pshare://ami?' + payload;
@@ -102,7 +109,7 @@
     }, 2500);
     var copy = document.getElementById('copy');
     copy.addEventListener('click', function () {
-      var done = function () { copy.textContent = 'Lien copié'; };
+      var done = function () { copy.textContent = en ? 'Link copied' : 'Lien copié'; };
       if (navigator.clipboard) navigator.clipboard.writeText(location.href).then(done, function () {});
     });
   })();

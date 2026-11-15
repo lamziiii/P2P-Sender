@@ -34,6 +34,10 @@ Var DesktopBefore
     ${Else}
       WriteRegStr HKCU "${MANUPRODUCTKEY}" "DesktopShortcut" "0"
     ${EndIf}
+    ; "Envoyer avec P2P Share" of the Explorer's menu (src/share.rs); a
+    ; reinstall's app adds it back when it starts.
+    DeleteRegKey HKCU "Software\Classes\*\shell\P2PShare"
+    DeleteRegKey HKCU "Software\Classes\Directory\shell\P2PShare"
   ${EndIf}
 !macroend
 
@@ -59,11 +63,12 @@ Var DesktopBefore
 
   ${If} $UpdateMode <> 1
   ${AndIfNot} ${Silent}
-    nsExec::ExecToStack 'netsh advfirewall firewall show rule name="${FIREWALL_RULE}"'
+    ; Full path: a netsh.exe next to the installer would run first.
+    nsExec::ExecToStack '"$SYSDIR\netsh.exe" advfirewall firewall show rule name="${FIREWALL_RULE}"'
     Pop $0
     Pop $1
     ${If} $0 <> 0
-      ExecShellWait "runas" "netsh" 'advfirewall firewall add rule name="${FIREWALL_RULE}" dir=in action=allow program="$INSTDIR\${MAINBINARYNAME}.exe" enable=yes profile=any' SW_HIDE
+      ExecShellWait "runas" "$SYSDIR\netsh.exe" 'advfirewall firewall add rule name="${FIREWALL_RULE}" dir=in action=allow program="$INSTDIR\${MAINBINARYNAME}.exe" enable=yes profile=any' SW_HIDE
     ${EndIf}
   ${EndIf}
 !macroend

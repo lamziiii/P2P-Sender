@@ -1,5 +1,6 @@
 import { Component } from 'react';
 import type { ErrorInfo, ReactNode } from 'react';
+import { tr } from './i18n';
 
 // A rendering error shows a way out instead of a blank window.
 export class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
@@ -19,9 +20,9 @@ export class ErrorBoundary extends Component<{ children: ReactNode }, { error: E
       <div className="app">
         <div className="content">
           <div className="empty-state">
-            Une erreur d’affichage est survenue.
+            {tr('Une erreur d’affichage est survenue.', 'A display error occurred.')}
             <div className="error-text">{this.state.error.message}</div>
-            <button className="btn" onClick={() => window.location.reload()}>Recharger</button>
+            <button className="btn" onClick={() => window.location.reload()}>{tr('Recharger', 'Reload')}</button>
           </div>
         </div>
       </div>

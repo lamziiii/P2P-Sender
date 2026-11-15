@@ -1,5 +1,18 @@
 # Nouveautés de P2P Share
 
+## 3.4.9 — 15 novembre 2026
+
+- **P2P Share en anglais** : l'app suit la langue de votre système, en français ou en anglais (toute autre langue donne l'anglais). Vous pouvez la choisir dans Paramètres → Général.
+- **Envoyer avec P2P Share** : envoyez un fichier ou un dossier sans ouvrir l'app d'abord. Sur Windows, faites un clic droit dessus dans l'Explorateur (sous « Afficher plus d'options » sur Windows 11) ; sur Mac, clic droit puis « Ouvrir avec » → P2P Share ; sur Linux, « Ouvrir avec » de votre gestionnaire de fichiers ; sur Android, le bouton Partager de vos autres apps (photos, fichiers…). P2P Share s'ouvre et vous demande à qui l'envoyer : un ami, un groupe ou un appareil LocalSend. Un texte ou un lien partagé depuis Android part en message. Sur Windows et Linux, vous pouvez retirer l'entrée dans Paramètres → Général.
+- **Mises à jour sur Android** : l'app trouve toute seule les nouvelles versions et les installe depuis Paramètres → À propos, sans passer par la page des versions. Android vous demande de confirmer, et la première fois d'autoriser P2P Share à installer des applications.
+- **Mac Intel** : l'app macOS marche aussi sur les Mac à processeur Intel, plus seulement sur Apple Silicon.
+- **Liens d'invitation** : en ouvrant le lien d'un ami, P2P Share vous demande de confirmer avant de l'ajouter, et vous prévient si un de vos amis porte déjà ce nom. Une page web ou une autre app ne peut plus ajouter quelqu'un à vos amis sans vous.
+- **Sauvegardes** : elles ne contiennent plus vos liens d'invitation. Après une restauration, ceux que vous aviez envoyés ne marchent plus : créez-en de nouveaux.
+- **Sécurité** : sur Android, les fichiers `.apk` sont traités comme des programmes, et le bouton Partager d'une autre app ne peut plus faire envoyer les fichiers internes de P2P Share ; après un redémarrage, un dossier reçu automatiquement redemande votre accord pour les programmes ; un appareil LocalSend qui a prouvé son identité ne reçoit plus jamais vos messages ni vos fichiers en clair ; un fichier retiré d'un groupe n'est plus envoyé, et un membre retiré ne peut plus finir de le télécharger ; les images de plus de 64 millions de pixels environ s'affichent sans aperçu, pour ne plus bloquer la discussion ; et plusieurs protections contre un membre de groupe malveillant.
+- Corrections : avec le paquet .deb, le réglage des mises à jour automatiques indique que votre mot de passe est demandé.
+
+Les mises à jour depuis l'app sur Android commencent avec cette version : installez-la une fois à la main.
+
 ## 3.4.8.5 — 5 novembre 2026
 
 - **Les transferts reprennent après un redémarrage** : un envoi ou une réception en cours avec un ami continue là où il s'était arrêté quand vous relancez l'app ou l'ordinateur, sans tout recommencer. Si le fichier envoyé a été modifié entre-temps, il ne reprend pas.

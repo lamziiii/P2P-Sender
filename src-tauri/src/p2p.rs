@@ -129,6 +129,8 @@ const RATE_WINDOW: Duration = Duration::from_secs(10);
 /// Control messages of any kind a peer may send per `RATE_WINDOW` (a fast
 /// folder brings an offer, or an accept and a complete, per file).
 const CONTROL_RATE_LIMIT: usize = 20_000;
+/// Group entry frames taken per peer and `RATE_WINDOW` (up to 128 KiB each).
+const GROUP_ENTRIES_LIMIT: usize = 500;
 /// Offers from one friend waiting for our answer.
 const MAX_PENDING_OFFERS: usize = 100;
 /// Offers we send to one friend per `RATE_WINDOW`, below its `RATE_LIMIT`.
@@ -294,7 +296,7 @@ impl CustomRelay {
             return Err("L'adresse doit commencer par https://".into());
         }
         if parsed.path() != "/" {
-            return Err("Le relais doit être à la racine du domaine (sans chemin)".into());
+            return Err(crate::lang::tr("Le relais doit être à la racine du domaine (sans chemin)", "The relay must be at the root of the domain (no path)").into());
         }
         let token = token.trim();
         Ok(CustomRelay {
@@ -774,6 +776,8 @@ struct Transfer {
     hidden: bool,
     /// Outgoing: serves a shared file a member asked for (no consent, no re-offer).
     serve: bool,
+    /// Its hash, checked again whenever the member asks for the bytes.
+    serve_hash: Option<String>,
     /// Incoming: downloads a shared file of a group.
     repo: Option<groups::Repo>,
     /// Incoming from outside the P2P network: the sender's name, and who
@@ -1130,6 +1134,7 @@ impl State {
             resyncing: false,
             hidden: false,
             serve: false,
+            serve_hash: None,
             repo: None,
             peer_name: None,
             decision: None,
@@ -1555,7 +1560,7 @@ pub fn is_executable(name: &str) -> bool {
         "settingcontent-ms", "library-ms", "docm", "xlsm", "pptm", "dotm", "xlam", "ppam", "sh",
         "command", "app", "pkg", "dmg", "deb", "rpm", "appimage", "run", "desktop", "msc", "ws",
         "wsc", "jnlp", "appref-ms", "diagcab", "py", "pyw", "pyz", "scpt", "applescript",
-        "terminal", "workflow",
+        "terminal", "workflow", "apk", "apks", "xapk", "apkm", "aab",
     ];
     let ext = extension(name).trim_start_matches('.').to_lowercase();
     RISKY.contains(&ext.as_str())
@@ -1883,6 +1888,12 @@ impl Node {
             // Large flow-control windows keep the pipe full on fast/long links.
             .stream_receive_window(VarInt::from_u32(32 << 20))
             .send_window(64 << 20)
+            // A peer's streams we do not read yet stay in memory: at most
+            // 128 MiB for a connection, one control stream (two connections
+            // may cross), a few data streams at once (more wait their turn).
+            .receive_window(VarInt::from_u32(128 << 20))
+            .max_concurrent_bidi_streams(VarInt::from_u32(2))
+            .max_concurrent_uni_streams(VarInt::from_u32(32))
             .build();
         let secret = opts.secret.clone();
         let mut builder = Endpoint::builder(presets::N0)
@@ -2087,7 +2098,7 @@ impl Node {
         let error = if home.is_connected() {
             None
         } else if let Some(reason) = home.auth_denied_reason() {
-            Some(format!("Refusé par le relais : {reason}"))
+            Some(crate::trf!("Refusé par le relais : {reason}", "Refused by the relay: {reason}"))
         } else {
             home.last_error().map(|e| e.to_string())
         };
@@ -3146,7 +3157,11 @@ impl Node {
                 // Maybe in sync with this member now, or not any more.
                 s.wake_timers = true;
             }
-            Some("group_entries") => {
+            // Each may replay the whole log: a flood is dropped (sent again
+            // at the next sync).
+            Some("group_entries")
+                if !s.over_limit(&format!("group_entries:{friend_id}"), GROUP_ENTRIES_LIMIT) =>
+            {
                 s.note_group_entries(friend_id, msg);
                 self.on_group_entries(s, friend_id, msg);
                 s.wake_timers = true;
@@ -3745,6 +3760,20 @@ impl Node {
         if t.dir != Dir::Out || t.friend_id != friend_id {
             return;
         }
+        // A shared file: only while they may still have it (still members,
+        // the file still listed and unchanged).
+        if t.serve && !t.status.is_final() {
+            let hash = t.serve_hash.clone().unwrap_or_default();
+            if s.may_serve(friend_id, &hash).is_none() {
+                let tid = tid.to_string();
+                s.send(friend_id, json!({ "type": "blob_missing", "tid": tid }));
+                self.stop_transfer(s, &tid, Status::Cancelled, None);
+                return;
+            }
+        }
+        let Some(t) = s.transfers.get_mut(tid) else {
+            return;
+        };
         // The receiver asking for the bytes is not holding it any more.
         t.peer_held = false;
         if t.held && !t.status.is_final() {
@@ -3786,7 +3815,7 @@ impl Node {
                     s,
                     &tid,
                     Status::Error,
-                    Some("Fichier source modifié pendant l’envoi".into()),
+                    Some(crate::lang::tr("Fichier source modifié pendant l’envoi", "Source file changed while sending").into()),
                 );
                 return;
             }
@@ -4282,7 +4311,7 @@ impl Node {
                 s.set_status(
                     id,
                     Status::Error,
-                    Some("Dossier de téléchargement inaccessible".into()),
+                    Some(crate::lang::tr("Dossier de téléchargement inaccessible", "Download folder not reachable").into()),
                 );
                 return;
             };
@@ -4393,7 +4422,7 @@ impl Node {
             Ok(permit) => permit,
             Err(_) => {
                 drop(slot);
-                return self.fail(&tid, "Écriture sur le disque impossible");
+                return self.fail(&tid, crate::lang::tr("Écriture sur le disque impossible", "Could not write to disk"));
             }
         };
         let Some(writer) = slot.as_mut() else { return };
@@ -4423,10 +4452,10 @@ impl Node {
                 }
             };
             if pos + data.len() as u64 > size {
-                break Some("Taille reçue incohérente");
+                break Some(crate::lang::tr("Taille reçue incohérente", "Inconsistent size received"));
             }
             if writer.write_all(&data).await.is_err() {
-                break Some("Écriture sur le disque impossible");
+                break Some(crate::lang::tr("Écriture sur le disque impossible", "Could not write to disk"));
             }
             pos += data.len() as u64;
             shared.bytes.store(pos, Ordering::Relaxed);
@@ -4442,7 +4471,7 @@ impl Node {
         };
         drop(large);
         if failure.is_none() && shared.session() == session && flushed.is_err() {
-            return self.fail(&tid, "Écriture sur le disque impossible");
+            return self.fail(&tid, crate::lang::tr("Écriture sur le disque impossible", "Could not write to disk"));
         }
         // Still holding the file: no other stream can start finishing too.
         match failure {
@@ -4589,7 +4618,7 @@ impl Node {
             }
             if !ok {
                 let _ = tokio::fs::remove_file(&part).await;
-                return node.fail(&tid, "Écriture sur le disque impossible");
+                return node.fail(&tid, crate::lang::tr("Écriture sur le disque impossible", "Could not write to disk"));
             }
             if let Some(hash) = expected.clone() {
                 if !Node::verify_download(part.clone(), hash).await {
@@ -4653,7 +4682,10 @@ impl Node {
                         s,
                         &tid,
                         Status::Error,
-                        Some(format!("Impossible d’enregistrer le fichier (gardé sous « {kept} »)")),
+                        Some(crate::trf!(
+                            "Impossible d’enregistrer le fichier (gardé sous « {kept} »)",
+                            "Could not save the file (kept as “{kept}”)"
+                        )),
                     );
                 }
             });
@@ -4675,7 +4707,7 @@ impl Node {
             self.next_source(s, &id, friend_id);
             return;
         }
-        let error = (status == Status::Cancelled).then(|| "Annulé par le contact".to_string());
+        let error = (status == Status::Cancelled).then(|| crate::lang::tr("Annulé par le contact", "Cancelled by the other side").to_string());
         let id = t.id.clone();
         self.stop_transfer(s, &id, status, error);
     }
@@ -4975,8 +5007,8 @@ async fn stream_file(job: Job, lan: Option<lan::Sink>) -> Result<Streamed, &'sta
                 return Ok(Streamed::Stopped);
             }
             Some(Some(Ok(data))) if !data.is_empty() => data,
-            Some(Some(Err(_))) => return Err("Lecture du fichier impossible"),
-            Some(_) => return Err("Fichier source modifié pendant l’envoi"),
+            Some(Some(Err(_))) => return Err(crate::lang::tr("Lecture du fichier impossible", "Could not read the file")),
+            Some(_) => return Err(crate::lang::tr("Fichier source modifié pendant l’envoi", "Source file changed while sending")),
         };
         // In small pieces under a speed limit, each waiting for its turn.
         let step = throttle.piece(data.len());
@@ -5068,7 +5100,7 @@ mod tests {
 
     #[test]
     fn recognizes_risky_and_part_files() {
-        assert!(is_executable("setup.EXE") && is_executable("a.lnk"));
+        assert!(is_executable("setup.EXE") && is_executable("a.lnk") && is_executable("app.APK"));
         assert!(!is_executable("photo.jpg") && !is_executable("exe"));
         assert!(is_part_file("rapport.pdf.0a1b2c3d.part"));
         assert!(!is_part_file("rapport.part") && !is_part_file("x.0a1b2c3g.part"));

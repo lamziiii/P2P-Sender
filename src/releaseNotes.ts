@@ -1,7 +1,10 @@
-import changelog from '../CHANGELOG.md?raw';
+import changelogFr from '../CHANGELOG.md?raw';
+import changelogEn from '../CHANGELOG.en.md?raw';
+import { isEnglish } from './i18n';
 
-// What a version brings, from CHANGELOG.md (bundled with the app) or from
-// the notes of an update: items ("- " lines) and plain notes.
+// What a version brings, from CHANGELOG.md (CHANGELOG.en.md in English,
+// both bundled with the app) or from the notes of an update: items ("- "
+// lines) and plain notes.
 export type Line = { item: boolean; text: string };
 export type Release = { version: string; date: string; lines: Line[] };
 
@@ -22,7 +25,7 @@ function parseChangelog(text: string): Release[] {
   });
 }
 
-export const RELEASES = parseChangelog(changelog);
+export const RELEASES = parseChangelog(isEnglish ? changelogEn : changelogFr);
 
 const NEWS_SEEN = 'news-seen';
 

@@ -7,6 +7,7 @@ import { BubbleActions, ChatInput, ChatSearch, PendingMark } from './chatParts';
 import { chatRows } from './chatRows';
 import { folderSendError, formatTime, plural, RELAY_HINT, ROUTE_LABELS } from './format';
 import { Avatar } from './FriendsTab';
+import { tr } from './i18n';
 import { Icon } from './icons';
 import { WindowButtons } from './PinButton';
 import { isMobile, useFoldersSupported, useLongPress } from './platform';
@@ -33,7 +34,7 @@ function Reactions({ reactions, myId, friendName, onReact }: {
     <div className="reactions">
       {[...byEmoji].map(([emoji, authors]) => {
         const mine = authors.includes(myId);
-        const names = authors.map(a => (a === myId ? 'Vous' : friendName)).join(', ');
+        const names = authors.map(a => (a === myId ? tr('Vous', 'You') : friendName)).join(', ');
         return (
           <button key={emoji} className={`reaction ${mine ? 'mine' : ''}`} title={names} onClick={() => onReact(emoji)}>
             {emoji}{authors.length > 1 && <span>{authors.length}</span>}
@@ -85,10 +86,10 @@ const FriendMessage = memo(function FriendMessage({ m, myId, friendId, friendNam
   const quote = m.reply && (
     <button
       className="bubble-quote list-button"
-      title="Voir le message d’origine"
+      title={tr('Voir le message d’origine', 'See the original message')}
       onClick={() => jumpTo(m.reply!.id)}
     >
-      <span className="quote-author">{m.reply.from === myId ? 'Vous' : friendName}</span>
+      <span className="quote-author">{m.reply.from === myId ? tr('Vous', 'You') : friendName}</span>
       <span className="quote-text">{m.reply.text}</span>
     </button>
   );
@@ -107,7 +108,7 @@ const FriendMessage = memo(function FriendMessage({ m, myId, friendId, friendNam
             {formatTime(m.ts)}
             {mine && (pending
               ? <PendingMark />
-              : m.status === 'read' ? <span title="Lu"> · Vu</span> : <span title="Livré"> ✓✓</span>)}
+              : m.status === 'read' ? <span title={tr('Lu', 'Read')}>{tr(' · Vu', ' · Seen')}</span> : <span title={tr('Livré', 'Delivered')}> ✓✓</span>)}
           </div>
         )}
       </div>
@@ -133,7 +134,7 @@ const FriendMessage = memo(function FriendMessage({ m, myId, friendId, friendNam
       <BubbleActions open={picking}>
         <button
           className="icon-btn small react-toggle"
-          title="Réagir"
+          title={tr('Réagir', 'React')}
           onClick={e => {
             e.stopPropagation();
             setPicking(!picking);
@@ -141,10 +142,10 @@ const FriendMessage = memo(function FriendMessage({ m, myId, friendId, friendNam
         >
           <Icon name="smile" size={14} />
         </button>
-        <button className="icon-btn small" title="Répondre" onClick={() => onReply(m)}><Icon name="reply" size={14} /></button>
+        <button className="icon-btn small" title={tr('Répondre', 'Reply')} onClick={() => onReply(m)}><Icon name="reply" size={14} /></button>
         {/* The text cannot be selected by touch: copied whole. */}
         {isMobile && !m.file && (
-          <button className="icon-btn small" title="Copier" onClick={() => navigator.clipboard.writeText(m.text)}><Icon name="copy" size={14} /></button>
+          <button className="icon-btn small" title={tr('Copier', 'Copy')} onClick={() => navigator.clipboard.writeText(m.text)}><Icon name="copy" size={14} /></button>
         )}
         {picking && <ReactionPicker current={ours} onPick={react} />}
       </BubbleActions>
@@ -265,7 +266,7 @@ export function FriendChatView({ friend, myId, messages, typing, notices, offers
   const react = useCallback(async (m: ChatMessage, emoji: string | null) => {
     const res = await api.reactMessage(friendId, m.id, emoji);
     if ('reactions' in res) onReactions(m.id, res.reactions);
-    else onToast('Réaction impossible sur ce message.');
+    else onToast(tr('Réaction impossible sur ce message.', 'You cannot react to this message.'));
   }, [friendId, onReactions, onToast]);
 
   const send = async () => {
@@ -281,7 +282,9 @@ export function FriendChatView({ friend, myId, messages, typing, notices, offers
       if ('error' in entry) {
         setInput(text);
         setReply(answering);
-        flash(entry.error === 'too_long' ? 'Message trop long (5000 caractères max).' : 'Message non envoyé.');
+        flash(entry.error === 'too_long'
+          ? tr('Message trop long (5000 caractères max).', 'Message too long (5,000 characters max).')
+          : tr('Message non envoyé.', 'Message not sent.'));
         return;
       }
       onSent(entry);
@@ -301,35 +304,40 @@ export function FriendChatView({ friend, myId, messages, typing, notices, offers
 
   const attachFiles = async () => {
     const count = await api.selectAndSendFile(friendId);
-    if (count > 0) onToast(`${plural(count, 'fichier envoyé', 'fichiers envoyés')} à ${friend.name}`);
+    if (count > 0) onToast(tr(`${plural(count, 'fichier envoyé', 'fichiers envoyés')} à ${friend.name}`, `${plural(count, 'file sent', 'files sent')} to ${friend.name}`));
   };
 
   const attachFolder = async () => {
     const res = await api.sendFolder(friendId);
     if ('error' in res) onToast(folderSendError(res.error));
-    else if (res.sent > 0) onToast(`Dossier envoyé à ${friend.name} (${plural(res.sent, 'fichier', 'fichiers')}) : suivez l’envoi dans l’onglet Transferts.`);
+    else if (res.sent > 0) {
+      onToast(tr(
+        `Dossier envoyé à ${friend.name} (${plural(res.sent, 'fichier', 'fichiers')}) : suivez l’envoi dans l’onglet Transferts.`,
+        `Folder sent to ${friend.name} (${plural(res.sent, 'file', 'files')}): follow it in the Transfers tab.`,
+      ));
+    }
   };
 
-  const replyName = reply ? (reply.from === myId ? 'vous-même' : friend.name) : '';
+  const replyName = reply ? (reply.from === myId ? tr('vous-même', 'yourself') : friend.name) : '';
 
   return (
     <div className={`app ${dropping ? 'dropping' : ''}`}>
       <div className="header">
         <div className="brand">
-          <button className="icon-btn" title="Retour" onClick={onBack}><Icon name="back" /></button>
+          <button className="icon-btn" title={tr('Retour', 'Back')} onClick={onBack}><Icon name="back" /></button>
           <Avatar id={friend.id} name={friend.name} online={friend.online} small />
           <div className="header-title">
             <div className="title">{friend.name}</div>
             {typing
-              ? <div className="subtitle typing">En train d’écrire…</div>
+              ? <div className="subtitle typing">{tr('En train d’écrire…', 'Typing…')}</div>
               : (
                 <div
                   className={`subtitle ${friend.online ? 'online' : ''}`}
                   title={friend.online && friend.route === 'relay' ? RELAY_HINT : undefined}
                 >
                   {friend.online
-                    ? `En ligne${friend.route ? ` · ${ROUTE_LABELS[friend.route]}` : ''} · chiffré de bout en bout`
-                    : 'Hors ligne · vos messages partiront à sa reconnexion'}
+                    ? `${tr('En ligne', 'Online')}${friend.route ? ` · ${ROUTE_LABELS[friend.route]}` : ''} · ${tr('chiffré de bout en bout', 'end-to-end encrypted')}`
+                    : tr('Hors ligne · vos messages partiront à sa reconnexion', 'Offline · your messages will go when they reconnect')}
                 </div>
               )}
           </div>
@@ -337,7 +345,7 @@ export function FriendChatView({ friend, myId, messages, typing, notices, offers
         <div className="header-actions">
           <button
             className={`icon-btn ${query !== null ? 'active' : ''}`}
-            title="Rechercher dans la discussion"
+            title={tr('Rechercher dans la discussion', 'Search the chat')}
             onClick={() => { setQuery(query === null ? '' : null); setBack(0); }}
           >
             <Icon name="search" />
@@ -363,7 +371,9 @@ export function FriendChatView({ friend, myId, messages, typing, notices, offers
         {messages.length === 0 && offers.length === 0 && (
           <div className="empty-state">
             <Icon name="chat" size={32} />
-            {isMobile ? 'Aucun message. Dites bonjour !' : 'Aucun message. Dites bonjour, ou glissez un fichier ou un dossier ici !'}
+            {isMobile
+              ? tr('Aucun message. Dites bonjour !', 'No messages. Say hello!')
+              : tr('Aucun message. Dites bonjour, ou glissez un fichier ou un dossier ici !', 'No messages. Say hello, or drop a file or a folder here!')}
           </div>
         )}
         <FriendChatRows
@@ -385,10 +395,10 @@ export function FriendChatView({ friend, myId, messages, typing, notices, offers
         <div className="reply-bar">
           <Icon name="reply" size={14} />
           <div className="item-body">
-            <div className="quote-author">Réponse à {replyName}</div>
+            <div className="quote-author">{tr(`Réponse à ${replyName}`, `Replying to ${replyName}`)}</div>
             <div className="item-sub ellipsis">{reply.file ? reply.file.name : reply.text}</div>
           </div>
-          <button className="icon-btn small" title="Annuler la réponse" onClick={() => setReply(null)}><Icon name="close" size={14} /></button>
+          <button className="icon-btn small" title={tr('Annuler la réponse', 'Cancel the reply')} onClick={() => setReply(null)}><Icon name="close" size={14} /></button>
         </div>
       )}
 
@@ -396,7 +406,7 @@ export function FriendChatView({ friend, myId, messages, typing, notices, offers
         value={input}
         onChange={type}
         onSend={send}
-        placeholder="Écrire un message…"
+        placeholder={tr('Écrire un message…', 'Write a message…')}
         maxLength={5000}
         error={error}
         inputRef={inputRef}
@@ -410,7 +420,7 @@ export function FriendChatView({ friend, myId, messages, typing, notices, offers
         before={
           <button
             className={`icon-btn attach ${attachMenu ? 'active' : ''}`}
-            title={folders ? 'Envoyer un fichier ou un dossier' : 'Envoyer un fichier'}
+            title={folders ? tr('Envoyer un fichier ou un dossier', 'Send a file or a folder') : tr('Envoyer un fichier', 'Send a file')}
             onClick={e => {
               e.stopPropagation();
               // Files only: no menu to choose.
@@ -428,8 +438,8 @@ export function FriendChatView({ friend, myId, messages, typing, notices, offers
       />
       {attachMenu && (
         <div className="menu-popover" role="menu" style={{ left: attachMenu.left, bottom: attachMenu.bottom }}>
-          <button role="menuitem" onClick={() => { setAttachMenu(null); attachFiles(); }}><Icon name="file" size={14} />Envoyer un fichier</button>
-          <button role="menuitem" onClick={() => { setAttachMenu(null); attachFolder(); }}><Icon name="folder" size={14} />Envoyer un dossier</button>
+          <button role="menuitem" onClick={() => { setAttachMenu(null); attachFiles(); }}><Icon name="file" size={14} />{tr('Envoyer un fichier', 'Send a file')}</button>
+          <button role="menuitem" onClick={() => { setAttachMenu(null); attachFolder(); }}><Icon name="folder" size={14} />{tr('Envoyer un dossier', 'Send a folder')}</button>
         </div>
       )}
     </div>

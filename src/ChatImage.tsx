@@ -3,6 +3,7 @@ import type { ReactNode } from 'react';
 import { api } from './api';
 import type { ChatMessage, Transfer, TransferStatus } from './api';
 import { formatBytes } from './format';
+import { locale, tr } from './i18n';
 import { useTransfer } from './transferStore';
 
 // Previews already made, by friend and message: the chat is reopened often.
@@ -25,19 +26,19 @@ const keepPreview = (key: string, url: string | null) => {
   while (previews.size > MAX_PREVIEWS) previews.delete(previews.keys().next().value!);
 };
 
-const time = (ts: number) => new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+const time = (ts: number) => new Date(ts).toLocaleTimeString(locale, { hour: '2-digit', minute: '2-digit' });
 
 const outLabel = (status: TransferStatus | undefined, t: Transfer | undefined) => {
   switch (status) {
     case 'completed': return ' ✓✓';
-    case 'declined': return ' · Refusée';
-    case 'cancelled': return ' · Annulée';
-    case 'error': return ' · Non envoyée';
+    case 'declined': return tr(' · Refusée', ' · Declined');
+    case 'cancelled': return tr(' · Annulée', ' · Cancelled');
+    case 'error': return tr(' · Non envoyée', ' · Not sent');
     case 'sending': return ` · ${t?.progress ?? 0} %`;
-    case 'paused': return ' · Reconnexion…';
-    case 'finishing': return ' · Envoi…';
+    case 'paused': return tr(' · Reconnexion…', ' · Reconnecting…');
+    case 'finishing': return tr(' · Envoi…', ' · Sending…');
     case undefined: return '';
-    default: return ' · En attente';
+    default: return tr(' · En attente', ' · Waiting');
   }
 };
 
@@ -74,21 +75,21 @@ export const ChatImage = memo(function ChatImage({ friendId, message, mine, onSh
 
   let body;
   if (visible && preview) {
-    body = <img className="chat-image" src={preview} alt={file.name} title="Ouvrir" onClick={open} onLoad={onShown} />;
+    body = <img className="chat-image" src={preview} alt={file.name} title={tr('Ouvrir', 'Open')} onClick={open} onLoad={onShown} />;
   } else if (visible) {
     body = (
-      <button className="image-placeholder list-button" onClick={open} title="Ouvrir">
-        {preview === undefined ? 'Chargement…' : `${file.name} · aperçu indisponible`}
+      <button className="image-placeholder list-button" onClick={open} title={tr('Ouvrir', 'Open')}>
+        {preview === undefined ? tr('Chargement…', 'Loading…') : tr(`${file.name} · aperçu indisponible`, `${file.name} · no preview`)}
       </button>
     );
   } else {
     let state;
     switch (status) {
       case 'pending':
-        state = transfer?.queued ? <div className="item-sub">En file d’attente</div> : (
+        state = transfer?.queued ? <div className="item-sub">{tr('En file d’attente', 'Queued')}</div> : (
           <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
-            <button className="btn btn-small" style={{ flex: 1 }} onClick={() => api.respondToFileOffer(message.id, true)}>Accepter</button>
-            <button className="btn btn-secondary btn-small" style={{ flex: 1 }} onClick={() => api.respondToFileOffer(message.id, false)}>Refuser</button>
+            <button className="btn btn-small" style={{ flex: 1 }} onClick={() => api.respondToFileOffer(message.id, true)}>{tr('Accepter', 'Accept')}</button>
+            <button className="btn btn-secondary btn-small" style={{ flex: 1 }} onClick={() => api.respondToFileOffer(message.id, false)}>{tr('Refuser', 'Decline')}</button>
           </div>
         );
         break;
@@ -102,10 +103,10 @@ export const ChatImage = memo(function ChatImage({ friendId, message, mine, onSh
         );
         break;
       case 'declined':
-        state = <div className="item-sub">Refusée</div>;
+        state = <div className="item-sub">{tr('Refusée', 'Declined')}</div>;
         break;
       default:
-        state = <div className="item-sub">Non reçue</div>;
+        state = <div className="item-sub">{tr('Non reçue', 'Not received')}</div>;
     }
     body = (
       <div className="image-placeholder">

@@ -22,11 +22,12 @@ export type Friend = {
 
 // An invitation link, before it is accepted. known: a friend already, and
 // connected; own: one of ours.
-export type InviteLink = { link: string; name: string; known: boolean; own: boolean };
+// id: whoever made it; lookalike: a friend already has that name.
+export type InviteLink = { link: string; name: string; known: boolean; own: boolean; id: string; lookalike: boolean };
 
 // An image sent or offered in the chat (the message id is the transfer's).
 // path: ours, or theirs once received; state: how the transfer ended.
-export type ChatFile = { name: string; size: number; path?: string; state?: TransferStatus };
+type ChatFile = { name: string; size: number; path?: string; state?: TransferStatus };
 
 export type ChatMessage = {
   id: string;
@@ -49,7 +50,7 @@ export type TransferStatus =
   | 'paused' | 'finishing' | 'completed' | 'declined' | 'cancelled' | 'error';
 
 // A folder sent as one transfer per file; root: where it is saved here.
-export type TransferFolder = { id: string; name: string; files: number; size: number; root?: string };
+type TransferFolder = { id: string; name: string; files: number; size: number; root?: string };
 
 export type Route = 'lan' | 'direct' | 'relay';
 
@@ -111,7 +112,14 @@ export type Config = {
   // Bytes per second each way, 0 for none.
   speedLimit: number;
   notifications: NotifySettings;
+  // Windows, Linux: "Envoyer avec P2P Share" in the file manager.
+  sendMenu?: boolean;
 };
+
+// Given to the app from outside ("Envoyer avec P2P Share", Android's share
+// menu): files and folders (on Android documents, copied once sent), or a text.
+type SharedItem = { path: string; name: string; dir: boolean };
+export type Shared = { items: SharedItem[]; text?: string };
 
 // Which system notifications show; groups keep their own mute.
 export type NotifySettings = {
@@ -170,7 +178,7 @@ export type GroupSummary = {
   unreadMentions: number;
 };
 
-export type GroupInvite = { gid: string; name: string; from: string; fromName: string };
+type GroupInvite = { gid: string; name: string; from: string; fromName: string };
 
 export type GroupsOverview = { groups: GroupSummary[]; invites: GroupInvite[] };
 
@@ -241,7 +249,7 @@ export type GroupFile = {
 export type OpenChat = { kind: 'friend' | 'group' | 'localsend'; id: string };
 
 // Why a folder was not sent.
-export type FolderError = 'empty' | 'too_many' | 'too_deep' | 'not_found';
+type FolderError = 'empty' | 'too_many' | 'too_deep' | 'not_found';
 
 // Do not disturb until turned off (the backend keeps anything above as such).
 export const DND_FOREVER = Number.MAX_SAFE_INTEGER;
@@ -295,6 +303,12 @@ export const api = {
   // Android: a service keeps the app reachable once closed; the value kept.
   setBackgroundService: (enable: boolean) => invoke<boolean>('set_background_service', { enable }),
   selectDownloadDir: () => invoke<string | null>('select_download_dir'),
+  setSendMenu: (enable: boolean) => invoke<boolean>('set_send_menu', { enable }),
+  // What was shared with the app since last asked, once; onShared: more came.
+  takeShared: () => invoke<Shared | null>('take_shared'),
+  onShared: on<null>('shared'),
+  // Paths to send it (keep: for a group's shared files, kept for good on Android).
+  sharedPaths: (paths: string[], keep: boolean) => invoke<string[]>('shared_paths', { paths, keep }),
   finishWelcome: () => { invoke('finish_welcome'); },
   // A friend's nickname came: their name may have changed.
   onFriendsChanged: on<null>('friends-changed'),
@@ -372,18 +386,22 @@ export const api = {
   getRelayStatus: () => invoke<RelayStatus | null>('get_relay_status'),
   // The relay status changed (same payload as getRelayStatus).
   onRelayStatus: on<RelayStatus | null>('relay-status'),
-  // Updates (desktop; on Android nothing is found, see Update.tsx).
+  // Updates (on Android, the APK is handed to the system's installer).
   getUpdate: () => invoke<UpdateInfo | null>('get_update'),
-  // Errors are French messages.
+  // Errors are messages in the interface's language.
   checkUpdate: () => invoke<UpdateInfo | null>('check_update'),
-  // Saves everything, installs and restarts; rejects with a French message.
+  // Saves everything, installs and restarts (Android: opens the installer).
   installUpdate: () => invoke<void>('install_update'),
-  // Install newer versions by themselves, once no transfer runs.
+  // Install newer versions by themselves, once no transfer runs (desktop).
   setAutoUpdate: (enable: boolean) => invoke<boolean>('set_auto_update', { enable }),
+  // Installed from the .deb: installing asks for the password.
+  updateAsksPassword: () => invoke<boolean>('update_asks_password'),
+  // The window's language, for the backend's own texts.
+  setLanguage: (lang: string) => { invoke('set_language', { lang }); },
   onUpdateAvailable: on<UpdateInfo>('update-available'),
   // null: not installing (any more); waiting: downloaded, held until the transfers end.
   onUpdateProgress: on<UpdateProgress | null>('update-progress'),
-  // A download failed (French message), also when it started by itself.
+  // A download failed (a message), also when it started by itself.
   onUpdateError: on<string>('update-error'),
   // Restarts the app when the setting changes.
   setRelay: (url: string, token: string) => invoke<void>('set_relay', { url, token }),
@@ -484,6 +502,6 @@ export const api = {
 // Where dropped files would go.
 export type DropTarget = { kind: 'friend' | 'group' | 'localsend'; id: string; name: string };
 
-export type DragDrop =
+type DragDrop =
   | { type: 'enter' | 'over' | 'drop'; x: number; y: number; paths: string[] }
   | { type: 'leave' };

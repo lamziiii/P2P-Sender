@@ -28,7 +28,8 @@ use tauri::Manager;
 use tauri::{AppHandle, State};
 use tauri_plugin_dialog::DialogExt;
 
-use crate::{store, vault, AppState, SHOW_AFTER_RESTART};
+use crate::lang::tr;
+use crate::{store, trf, vault, AppState, SHOW_AFTER_RESTART};
 
 const MAGIC: &[u8] = b"P2PSHARE-BACKUP\0";
 const VERSION: u8 = 1;
@@ -54,9 +55,6 @@ const ASIDE_PREFIX: &str = "avant-restauration-";
 const FILES: &[&str] = &[
     "identity.key",
     "friends.json",
-    // Sealed with the history key, which the backup holds: links still open
-    // keep working once restored.
-    "invites.json",
     "config.json",
     "lan.json",
     "localsend.json",
@@ -72,6 +70,8 @@ const CHATS_DIR: &str = "messages";
 const REPLACED: &[&str] = &[
     "identity.",
     "friends.",
+    // Not saved: a restore would make links used since valid again. Those
+    // still open stop working; new ones are made in a moment.
     "invites.",
     "config.",
     "lan.",
@@ -82,10 +82,27 @@ const REPLACED: &[&str] = &[
     "groups",
 ];
 
-const NOT_A_BACKUP: &str = "Ce fichier n'est pas une sauvegarde P2P Share.";
-const NEWER: &str = "Cette sauvegarde vient d'une version plus récente de P2P Share : \
-                     mettez l'application à jour pour l'importer.";
-const WRONG_PASSWORD: &str = "Mot de passe incorrect, ou fichier de sauvegarde endommagé.";
+fn not_a_backup() -> &'static str {
+    tr(
+        "Ce fichier n'est pas une sauvegarde P2P Share.",
+        "This file is not a P2P Share backup.",
+    )
+}
+
+fn newer() -> &'static str {
+    tr(
+        "Cette sauvegarde vient d'une version plus récente de P2P Share : \
+         mettez l'application à jour pour l'importer.",
+        "This backup comes from a newer version of P2P Share: update the app to import it.",
+    )
+}
+
+fn wrong_password() -> &'static str {
+    tr(
+        "Mot de passe incorrect, ou fichier de sauvegarde endommagé.",
+        "Wrong password, or damaged backup file.",
+    )
+}
 
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -103,7 +120,7 @@ struct Payload {
 }
 
 fn derive_key(password: &str, salt: &[u8], iterations: u32) -> io::Result<LessSafeKey> {
-    let iterations = NonZeroU32::new(iterations).ok_or_else(|| io::Error::other(NOT_A_BACKUP))?;
+    let iterations = NonZeroU32::new(iterations).ok_or_else(|| io::Error::other(not_a_backup()))?;
     let mut raw = [0u8; 32];
     ring::pbkdf2::derive(
         ring::pbkdf2::PBKDF2_HMAC_SHA256,
@@ -143,28 +160,28 @@ fn encrypt(payload: &[u8], password: &str) -> io::Result<Vec<u8>> {
 /// The payload of a backup file, or a French message saying why not.
 fn decrypt(data: &[u8], password: &str) -> Result<Vec<u8>, String> {
     if !data.starts_with(MAGIC) || data.len() <= MAGIC.len() {
-        return Err(NOT_A_BACKUP.into());
+        return Err(not_a_backup().into());
     }
     if data[MAGIC.len()] > VERSION {
-        return Err(NEWER.into());
+        return Err(newer().into());
     }
     if data[MAGIC.len()] != VERSION || data.len() < HEADER_LEN + CHACHA20_POLY1305.tag_len() {
-        return Err(NOT_A_BACKUP.into());
+        return Err(not_a_backup().into());
     }
     let (header, body) = data.split_at(HEADER_LEN);
     let at = MAGIC.len() + 1;
     let iterations = u32::from_be_bytes(header[at..at + 4].try_into().expect("4 bytes"));
     if iterations > MAX_ITERATIONS {
-        return Err(NOT_A_BACKUP.into());
+        return Err(not_a_backup().into());
     }
     let salt = &header[at + 4..at + 4 + SALT_LEN];
     let nonce = Nonce::try_assume_unique_for_key(&header[at + 4 + SALT_LEN..])
-        .map_err(|_| NOT_A_BACKUP.to_string())?;
+        .map_err(|_| not_a_backup().to_string())?;
     let key = derive_key(password, salt, iterations).map_err(|e| e.to_string())?;
     let mut body = body.to_vec();
     let len = key
         .open_in_place(nonce, Aad::from(header), &mut body)
-        .map_err(|_| WRONG_PASSWORD.to_string())?
+        .map_err(|_| wrong_password().to_string())?
         .len();
     body.truncate(len);
     Ok(body)
@@ -251,20 +268,20 @@ fn allowed_path(rel: &str) -> Option<PathBuf> {
 /// Check a decrypted payload and write it, ready, to `PENDING`.
 fn prepare(dir: &Path, payload: &[u8]) -> Result<(), String> {
     let format: serde_json::Value =
-        serde_json::from_slice(payload).map_err(|_| NOT_A_BACKUP.to_string())?;
+        serde_json::from_slice(payload).map_err(|_| not_a_backup().to_string())?;
     if format["format"].as_u64().is_some_and(|f| f > FORMAT as u64) {
-        return Err(NEWER.into());
+        return Err(newer().into());
     }
     let payload: Payload =
-        serde_json::from_value(format).map_err(|_| NOT_A_BACKUP.to_string())?;
+        serde_json::from_value(format).map_err(|_| not_a_backup().to_string())?;
     let vault_key: [u8; 32] = hex::decode(&payload.vault_key)
         .ok()
         .and_then(|k| k.try_into().ok())
-        .ok_or_else(|| NOT_A_BACKUP.to_string())?;
+        .ok_or_else(|| not_a_backup().to_string())?;
     let mut files = Vec::new();
     for (rel, content) in &payload.files {
-        let path = allowed_path(rel).ok_or_else(|| NOT_A_BACKUP.to_string())?;
-        let bytes = b64().decode(content).map_err(|_| NOT_A_BACKUP.to_string())?;
+        let path = allowed_path(rel).ok_or_else(|| not_a_backup().to_string())?;
+        let bytes = b64().decode(content).map_err(|_| not_a_backup().to_string())?;
         files.push((path, bytes));
     }
     let identity_ok = files.iter().any(|(path, bytes)| {
@@ -275,10 +292,12 @@ fn prepare(dir: &Path, payload: &[u8]) -> Result<(), String> {
                 .is_some_and(|seed| seed.len() == 32)
     });
     if !identity_ok {
-        return Err(NOT_A_BACKUP.into());
+        return Err(not_a_backup().into());
     }
 
-    let failed = |e: io::Error| format!("Préparation de la restauration impossible : {e}");
+    let failed = |e: io::Error| {
+        trf!("Préparation de la restauration impossible : {e}", "Could not prepare the restore: {e}")
+    };
     let tmp = dir.join(PENDING_TMP);
     // Ours, left by an attempt cut short.
     if tmp.exists() {
@@ -444,14 +463,14 @@ async fn pick(app: &AppHandle, save: bool) -> Option<(PathBuf, Option<String>)> 
     if save {
         let (date, _) = date_time(crate::now_ms());
         dialog
-            .set_title("Enregistrer la sauvegarde")
+            .set_title(tr("Enregistrer la sauvegarde", "Save the backup"))
             .set_file_name(format!("P2PShare-sauvegarde-{date}.{EXTENSION}"))
             .save_file(move |p| {
                 let _ = tx.send(p);
             });
     } else {
         dialog
-            .set_title("Choisir une sauvegarde à restaurer")
+            .set_title(tr("Choisir une sauvegarde à restaurer", "Choose a backup to restore"))
             .pick_file(move |p| {
                 let _ = tx.send(p);
             });
@@ -490,8 +509,9 @@ pub async fn export_backup(
     include_chats: bool,
 ) -> Result<Option<String>, String> {
     if password.chars().count() < MIN_PASSWORD {
-        return Err(format!(
-            "Le mot de passe doit faire au moins {MIN_PASSWORD} caractères."
+        return Err(trf!(
+            "Le mot de passe doit faire au moins {MIN_PASSWORD} caractères.",
+            "The password must be at least {MIN_PASSWORD} characters."
         ));
     }
     #[cfg_attr(not(target_os = "android"), allow(unused_variables))]
@@ -509,11 +529,11 @@ pub async fn export_backup(
     let target = path.clone();
     tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
         let payload = collect(&dir, include_chats, id)
-            .map_err(|e| format!("Lecture des données impossible : {e}"))?;
+            .map_err(|e| trf!("Lecture des données impossible : {e}", "Could not read the data: {e}"))?;
         let json = serde_json::to_vec(&payload).map_err(|e| e.to_string())?;
         let bytes = encrypt(&json, &password).map_err(|e| e.to_string())?;
         store::write_atomic(&target, &bytes)
-            .map_err(|e| format!("Écriture de la sauvegarde impossible : {e}"))?;
+            .map_err(|e| trf!("Écriture de la sauvegarde impossible : {e}", "Could not write the backup: {e}"))?;
         // Not in the user's folder: the file replaced, if any.
         let _ = fs::remove_file(PathBuf::from(format!("{}.bak", target.display())));
         Ok(())
@@ -530,7 +550,7 @@ pub async fn export_backup(
         })
         .await
         .map_err(|e| e.to_string())?
-        .map_err(|e| format!("Écriture de la sauvegarde impossible : {e}"))?;
+        .map_err(|e| trf!("Écriture de la sauvegarde impossible : {e}", "Could not write the backup: {e}"))?;
         return Ok(Some(name));
     }
     Ok(Some(path.to_string_lossy().into_owned()))
@@ -550,9 +570,9 @@ pub async fn import_backup(
     };
     let dir = state.data_dir.clone();
     tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
-        let read = |e: io::Error| format!("Lecture du fichier impossible : {e}");
+        let read = |e: io::Error| trf!("Lecture du fichier impossible : {e}", "Could not read the file: {e}");
         if fs::metadata(&path).map_err(read)?.len() > MAX_FILE {
-            return Err(NOT_A_BACKUP.into());
+            return Err(not_a_backup().into());
         }
         let data = fs::read(&path).map_err(read)?;
         let payload = decrypt(&data, &password)?;
@@ -572,11 +592,11 @@ mod tests {
     fn password_and_format_checks() {
         let sealed = encrypt(b"{}", "correct horse").unwrap();
         assert_eq!(decrypt(&sealed, "correct horse").unwrap(), b"{}");
-        assert_eq!(decrypt(&sealed, "wrong horse").unwrap_err(), WRONG_PASSWORD);
-        assert_eq!(decrypt(b"PK\x03\x04 zip", "x").unwrap_err(), NOT_A_BACKUP);
+        assert_eq!(decrypt(&sealed, "wrong horse").unwrap_err(), wrong_password());
+        assert_eq!(decrypt(b"PK\x03\x04 zip", "x").unwrap_err(), not_a_backup());
         let mut newer = sealed.clone();
         newer[MAGIC.len()] = VERSION + 1;
-        assert_eq!(decrypt(&newer, "correct horse").unwrap_err(), NEWER);
+        assert_eq!(decrypt(&newer, "correct horse").unwrap_err(), super::newer());
         assert_eq!(date_time(1_792_454_400_000).0, "2026-10-20");
         assert!(allowed_path("../identity.key").is_none());
         assert!(allowed_path("groups/..").is_none());
