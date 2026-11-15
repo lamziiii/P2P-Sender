@@ -6,13 +6,7 @@ P2P Share is a lightweight, privacy-focused app built with **Tauri**, **Rust** a
 
 ## Install
 
-**Windows** (winget):
-
-```powershell
-winget install lamzii.P2PShare
-```
-
-Or download the installer for your system from the [latest release](https://github.com/lamziiii/P2P-Sender/releases/latest):
+Download the installer for your system from the [latest release](https://github.com/lamziiii/P2P-Sender/releases/latest):
 
 - **Windows**: `P2PShare_*_x64-setup.exe`
 - **macOS** (Apple Silicon and Intel): `P2PShare_*_universal.dmg`
@@ -162,13 +156,12 @@ The interface is written in French and English: `tr('…', '…')` from `src/i18
 
 ### Release
 
-Set the version with `npm run set-version <x.y.z>`: it writes it in package.json and its lock, `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml` and `Cargo.lock` (builds use `--locked`). A fourth number is optional (`npm run set-version 3.4.7.2`, from .1): Cargo, npm and Tauri take three numbers only, so the files hold `3.4.7+2` (semver build metadata, which Tauri also turns into the Windows version 3.4.7.2), while the tag, `CHANGELOG.md`, the app, the release files and winget say 3.4.7.2, and the updater counts it as newer than 3.4.7.
+Set the version with `npm run set-version <x.y.z>`: it writes it in package.json and its lock, `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml` and `Cargo.lock` (builds use `--locked`). A fourth number is optional (`npm run set-version 3.4.7.2`, from .1): Cargo, npm and Tauri take three numbers only, so the files hold `3.4.7+2` (semver build metadata, which Tauri also turns into the Windows version 3.4.7.2), while the tag, `CHANGELOG.md`, the app and the release files say 3.4.7.2, and the updater counts it as newer than 3.4.7.
 
-Push a version tag (`git tag v3.4.7 && git push origin v3.4.7`, or `v3.4.7.2`): GitHub Actions checks that the tag matches that version, builds the installers for the three systems (a universal macOS app for Apple Silicon and Intel) and the APK, signs the update files, publishes the release with `latest.json` last (what installed apps read to update), then submits the new version to winget (see `.github/workflows/build.yml`).
+Push a version tag (`git tag v3.4.7 && git push origin v3.4.7`, or `v3.4.7.2`): GitHub Actions checks that the tag matches that version, builds the installers for the three systems (a universal macOS app for Apple Silicon and Intel) and the APK, signs the update files, publishes the release with `latest.json` last (what installed apps read to update); see `.github/workflows/build.yml`.
 
 - A stable release stops before publishing if the APK or the update signing key is missing, and before building if `CHANGELOG.md` has no `## x.y.z — <date>` section for it (until the release, the section of the next version says « à venir » instead of the date). That section becomes the release notes, the notes shown before installing an update, and what the app shows once updated.
-- A prerelease tag (`v3.4.0-beta.1`) is published as a prerelease, not marked latest, and not sent to winget.
-- The winget step needs a `WINGET_TOKEN` secret: a classic GitHub token with the `public_repo` scope.
+- A prerelease tag (`v3.4.0-beta.1`) is published as a prerelease, not marked latest.
 
 ### Invitation links
 
